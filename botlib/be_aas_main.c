@@ -43,6 +43,7 @@ Foundation, Inc., 51 Franklin St, Fifth Floor, Boston, MA  02110-1301  USA
 #include "be_aas_funcs.h"
 #include "be_interface.h"
 #include "be_aas_def.h"
+#include "be_ig_hook.h" /* IG: */
 
 aas_t aasworld;
 
@@ -237,6 +238,7 @@ int AAS_LoadFiles(const char *mapname)
 		return errnum;
 
 	botimport.Print(PRT_MESSAGE, "loaded %s\n", aasfile);
+	IG_AdjustGrappleCosts(); /* IG: IG-6, before AAS_InitRouting */
 	Q_strncpyz(aasworld.filename, aasfile, sizeof(aasworld.filename));
 	return BLERR_NOERROR;
 } //end of the function AAS_LoadFiles

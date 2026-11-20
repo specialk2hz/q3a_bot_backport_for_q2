@@ -183,6 +183,7 @@ extern int maxclients;
 /* The Quake II bot library interface (q2_bot_import_t, q2_bot_export_t and
  * the structs they pass) is be_interface_q2.h. */
 #include "be_interface_q2.h"
+#include "be_ig_hook.h" /* IG: */
 
 /* Character indices (from ioq3/code/game/chars.h) */
 #define Q2CHAR_GENDER              1
@@ -2346,6 +2347,10 @@ static int Q2BotUpdateEntity(int ent, q2_bot_updateentity_t *bue)
             state.modelindex = bue->modelindex - 1;
         } else if (bue->solid == 1 /* SOLID_TRIGGER */ && bue->modelindex > 0) {
             state.type = 2; /* ET_ITEM */
+        } else if (IG_IsHookEntity(bue->solid, bue->renderfx, bue->modelindex, /* IG: Q2 hooks (IG-6) */
+                                   q2_modelnames, q2_nummodelnames)) {
+            state.type   = 3; /* ET_MISSILE */
+            state.weapon = IG_GRAPPLE_WEAPON;
         } else if (bue->effects & Q2_MISSILE_EFFECTS) {
             /* Q2 projectiles: the engine sets EF_ROCKET, EF_GRENADE, or
              * EF_BLASTER on actual missile entities for trail rendering.

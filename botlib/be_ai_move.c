@@ -45,6 +45,7 @@ Foundation, Inc., 51 Franklin St, Fifth Floor, Boston, MA  02110-1301  USA
 #include "../game_q3/be_ea.h"
 #include "../game_q3/be_ai_goal.h"
 #include "../game_q3/be_ai_move.h"
+#include "be_ig_hook.h" /* IG: */
 
 
 //#define DEBUG_AI_MOVE
@@ -2921,6 +2922,7 @@ int GrappleState(bot_movestate_t *ms, aas_reachability_t *reach)
 	//if the grapple hook is pulling
 	if (ms->moveflags & MFL_GRAPPLEPULL)
 		return 2;
+	if (IG_HookDetect()) return IG_GrappleState(ms->origin, ms->viewoffset, reach->end); /* IG: IG-6 */
 	//check for a visible grapple missile entity
 	//or visible grapple entity
 	for (i = AAS_NextEntity(0); i; i = AAS_NextEntity(i))
@@ -3009,6 +3011,7 @@ bot_moveresult_t BotTravel_Grapple(bot_movestate_t *ms, aas_reachability_t *reac
 		VectorSubtract(reach->end, ms->origin, dir);
 		dir[2] = 0;
 		dist = VectorLength(dir);
+		if (IG_HookDetect()) dist = IG_GrappleDist(ms->origin, ms->viewoffset, reach->end); /* IG: IG-6 */
 		//if very close to the grapple end or the grappled is hooked and
 		//the bot doesn't get any closer
 		if (state && dist < 48)
