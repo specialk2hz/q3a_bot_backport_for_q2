@@ -45,6 +45,7 @@ of the License, or (at your option) any later version.
 #include "be_aas_funcs.h"
 #include "be_interface.h"
 #include "be_aas_def.h"
+#include "../game_q3/be_ea.h"
 #include "be_ig_hook.h"
 
 #define Q2_RF_BEAM          0x80
@@ -146,25 +147,90 @@ float IG_GrappleDist(const vec3_t origin, const vec3_t viewoffset, const vec3_t 
 	return dist < 0 ? 0 : dist;
 }
 
+/* Where to aim the hook. bspc proved a grapple route by sweeping the
+ * player's box with its ORIGIN on the line from the start to the anchor
+ * (AAS_Reachability_Grapple); OSP's hook pulls the EYE to the anchor
+ * (GrapplePull), so the body rides a viewheight lower than that line and on a
+ * shallow approach its feet catch the lip of the ledge: no more progress, Q3
+ * lets go, the bot drops back. Aiming the same height higher on the wall puts
+ * the body back on bspc's line. Only if that point is on the same surface (a
+ * trace from the eye ends within 16 units of it); otherwise the anchor as is.
+ * ig_hookaim 0 turns it off (default 1). */
+void IG_GrappleAim(const vec3_t eye, const vec3_t anchor, float lift, int passent, vec3_t viewdir)
+{
+	vec3_t target, d;
+	bsp_trace_t trace;
+
+	if (!LibVarValue("ig_hookaim", "1")) return;
+	VectorCopy(anchor, target);
+	target[2] += lift;
+	trace = AAS_Trace((vec_t *) eye, NULL, NULL, target, passent, CONTENTS_SOLID);
+	VectorSubtract(target, trace.endpos, d);
+	if (VectorLength(d) > 16) return;
+	VectorSubtract(target, eye, viewdir);
+}
+
+/* The watchdog. Q3's grapple travel only runs while the bot follows its
+ * route (BotMoveToGoal). A bot that sees an enemy mid-hook switches to its
+ * fight movement and nothing lets go: on an OSP hook it hangs there for
+ * hook_holdtime (7.5 s), a free kill. So BotTravel_Grapple notes every think
+ * it runs, and once per frame, for every bot, a hook whose travel has not run
+ * for IG_HOOK_ORPHAN seconds is let go of. */
+#define IG_HOOK_ORPHAN  0.3f
+static float ig_grapplenote[MAX_CLIENTS];
+
+void IG_GrappleTravelNote(int client)
+{
+	if (client >= 0 && client < MAX_CLIENTS) ig_grapplenote[client] = AAS_Time();
+}
+
+void IG_GrappleWatchdog(int client)
+{
+	if (!IG_HookDetect() || client < 0 || client >= MAX_CLIENTS) return;
+	if (ig_grapplenote[client] <= 0) return;
+	/* a new map restarts the clock */
+	if (AAS_Time() < ig_grapplenote[client]) { ig_grapplenote[client] = 0; return; }
+	if (AAS_Time() - ig_grapplenote[client] < IG_HOOK_ORPHAN) return;
+	EA_Command(client, LibVarGetString("cmd_grappleoff"));
+	ig_grapplenote[client] = 0;
+}
+
+#define IG_FEET  24   /* a reachability's start is the origin; feet are 24 below */
+#define IG_CLIMB 48   /* a climb lands at least this far above the start's feet */
+
 /* Called once the AAS file is loaded, before the routing is initialised. */
 void IG_AdjustGrappleCosts(void)
 {
-	int i, n = 0;
+	int i, n = 0, nodrop = 0, climbonly;
 	float start, t;
 	vec3_t d;
 	aas_reachability_t *r;
 
 	start = LibVarGetValue("ig_rs_startgrapple");
 	if (start <= 0) return;
+	climbonly = LibVarValue("ig_hookclimbonly", "1") != 0;
 	for (i = 0; i < aasworld.reachabilitysize; i++)
 	{
 		r = &aasworld.reachability[i];
 		if ((r->traveltype & TRAVELTYPE_MASK) != TRAVEL_GRAPPLEHOOK) continue;
+		/* Climbs only: bspc also makes routes that hook a ceiling and drop to
+		 * the floor below it, often no higher than the start -- a fast way
+		 * across a room that leaves the bot falling. A route whose landing
+		 * floor is not IG_CLIMB units above the start is taken out: made
+		 * TRAVEL_INVALID, whose TFL_INVALID no route allows (be_aas_route.c
+		 * skips it). Not a huge cost: route times are summed in an
+		 * unsigned short and would wrap. */
+		if (climbonly && aasworld.areas[r->areanum].mins[2] < r->start[2] - IG_FEET + IG_CLIMB)
+		{
+			r->traveltype = (r->traveltype & ~TRAVELTYPE_MASK) | TRAVEL_INVALID;
+			nodrop++;
+			continue;
+		}
 		/* be_aas_reach.c's formula, with the fixed part ours */
 		VectorSubtract(r->end, r->start, d);
 		t = start + VectorLength(d) * 0.25f;
 		r->traveltime = t > 65535 ? 65535 : (unsigned short) t;
 		n++;
 	}
-	if (n) botimport.Print(PRT_MESSAGE, "ig: %d grapple reachabilities at start cost %d\n", n, (int) start);
+	if (n || nodrop) botimport.Print(PRT_MESSAGE, "ig: %d grapple reachabilities at start cost %d, %d that climb less than %d taken out\n", n, (int) start, nodrop, IG_CLIMB);
 }

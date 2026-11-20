@@ -2619,6 +2619,7 @@ static int Q2BotAI(int client, float thinktime)
      * separate priority reconstruction is needed on this side of the
      * bridge. --- */
     Q2BotCoastBrake(bs, thinktime);
+    IG_GrappleWatchdog(client); /* IG: let go of an orphaned hook (IG-6) */
     Com_Memset(&q3input, 0, sizeof(q3input));
     EA_GetInput(client, thinktime, &q3input);
     q2_lastattack[client] = (q3input.actionflags & 0x0000001) != 0;  /* ACTION_ATTACK */

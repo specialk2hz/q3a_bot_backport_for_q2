@@ -2979,6 +2979,7 @@ bot_moveresult_t BotTravel_Grapple(bot_movestate_t *ms, aas_reachability_t *reac
 	int state, areanum;
 	bsp_trace_t trace;
 
+	IG_GrappleTravelNote(ms->client); /* IG: the hook watchdog (IG-6) */
 #ifdef DEBUG_GRAPPLE
 	static int debugline;
 	if (!debugline) debugline = botimport.DebugLineCreate();
@@ -3070,6 +3071,7 @@ bot_moveresult_t BotTravel_Grapple(bot_movestate_t *ms, aas_reachability_t *reac
 		if (!(ms->moveflags & MFL_SWIMMING)) dir[2] = 0;
 		VectorAdd(ms->origin, ms->viewoffset, org);
 		VectorSubtract(reach->end, org, viewdir);
+		if (IG_HookDetect()) IG_GrappleAim(org, reach->end, ms->viewoffset[2], ms->entitynum, viewdir); /* IG: IG-6 */
 		//
 		dist = VectorNormalize(dir);
 		Vector2Angles(viewdir, result.ideal_viewangles);
