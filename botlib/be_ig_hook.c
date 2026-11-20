@@ -47,8 +47,12 @@ of the License, or (at your option) any later version.
 #include "be_aas_def.h"
 #include "../game_q3/be_ea.h"
 #include "be_ig_hook.h"
+#include <stdlib.h>
+
+void AAS_RemoveRoutingCacheUsingArea(int areanum);    /* be_aas_route.c */
 
 #define Q2_RF_BEAM          0x80
+#define Q2_SOLID_NOT        0
 #define Q2_SOLID_BBOX       2
 #define Q2_HOOK_MODEL       "models/weapons/grapple/hook/tris.md2"
 
@@ -79,10 +83,12 @@ static int IG_HookModelIndex(char **names, int count)
 int IG_IsHookEntity(int solid, int renderfx, int modelindex, char **names, int count)
 {
 	if (!IG_HookDetect()) return false;
-	if (solid != Q2_SOLID_BBOX) return false;
-	/* OSP's laser hook (and Lithium's): a beam that is solid. target_laser
-	 * is a beam too, but SOLID_NOT. */
-	if (renderfx & Q2_RF_BEAM) return true;
+	/* OSP's laser hook (and Lithium's) is a beam: SOLID_BBOX while it flies,
+	 * SOLID_NOT once it has latched on (GrappleTouch). A target_laser is a
+	 * beam too and is not told apart here: IG_GrappleState only takes a hook
+	 * that lies on the bot's own line to its anchor, which a map's laser
+	 * practically never does. */
+	if ((renderfx & Q2_RF_BEAM) && (solid == Q2_SOLID_BBOX || solid == Q2_SOLID_NOT)) return true;
 	/* Threewave's cable hook: its own model */
 	return modelindex > 0 && modelindex == IG_HookModelIndex(names, count);
 }
@@ -128,23 +134,46 @@ int IG_GrappleState(const vec3_t origin, const vec3_t viewoffset, const vec3_t a
 	return 0;
 }
 
-/* BotTravel_Grapple's distance to the anchor, for a Q2 hook. Q3 measures it
- * horizontally, because its hook pulls a player into a wall; an OSP hook pulls
- * toward the anchor in 3D, so on a high or ceiling anchor the horizontal
- * distance stops shrinking while the bot is still rising, and Q3 let go
- * mid-climb. In 3D, from the eye as OSP measures it: OSP hangs the player
- * once the eye is within 64 units, and Q3 releases inside 48 when it stops
- * getting closer, so the hang reads as 64 - 24 = 40 and releases there. */
-#define IG_HANG_OFFSET 24
-float IG_GrappleDist(const vec3_t origin, const vec3_t viewoffset, const vec3_t anchor)
+/* BotTravel_Grapple's "distance to the anchor", which is what decides when
+ * the bot lets go: inside 48 and no closer than last frame, it releases; not
+ * gaining 2 units a frame for 0.4 s, it gives up and releases (Q3's rules).
+ *
+ * Q3 measured it horizontally, for a hook that pulls a player into a wall.
+ * An OSP hook pulls the eye to the anchor in 3D, and where the anchor is on
+ * the back wall of a ledge the bot arrives fast, beside the ledge rather than
+ * over it, and let go there it slid off and fell -- below where it started.
+ * So the value returned is a steering signal, not a measurement:
+ *   - over the landing area (the reachability's area): 0, so Q3 releases on
+ *     the next frame and the bot drops onto the ledge;
+ *   - otherwise, for up to IG_HOLD_MAX seconds after the hook went out, a
+ *     value that keeps shrinking but stays above 48: Q3 neither releases nor
+ *     gives up, and the pull, then OSP's hang, carries the bot onto it;
+ *   - after that, the eye's real distance to the anchor, so Q3's give-up
+ *     rule ends a hook that is not getting there. */
+#define IG_HOLD_MAX  1.5f
+static float ig_hookout[MAX_CLIENTS];
+
+float IG_GrappleDist(int client, const vec3_t origin, const vec3_t viewoffset, const struct aas_reachability_s *reach, float last)
 {
-	vec3_t eye, d;
-	float dist;
+	vec3_t eye, d, below;
+	float real;
 
 	VectorAdd(origin, viewoffset, eye);
-	VectorSubtract(anchor, eye, d);
-	dist = VectorLength(d) - IG_HANG_OFFSET;
-	return dist < 0 ? 0 : dist;
+	VectorSubtract(reach->end, eye, d);
+	real = VectorLength(d);
+	if (client < 0 || client >= MAX_CLIENTS) return real;
+	/* BotTravel_Grapple sets lastgrappledist to 999999 when it fires */
+	if (last > 99999) ig_hookout[client] = AAS_Time();
+	VectorCopy(origin, below);
+	below[2] -= 48;
+	if (AAS_PointAreaNum((vec_t *) origin) == reach->areanum || AAS_PointAreaNum(below) == reach->areanum)
+		return 0;
+	if (AAS_Time() - ig_hookout[client] < IG_HOLD_MAX)
+	{
+		if (last > 99999) return real > 100 ? real : 100;
+		return last - 3 > 50 ? last - 3 : 50;
+	}
+	return real;
 }
 
 /* Where to aim the hook. bspc proved a grapple route by sweeping the
@@ -198,6 +227,46 @@ void IG_GrappleWatchdog(int client)
 #define IG_FEET  24   /* a reachability's start is the origin; feet are 24 below */
 #define IG_CLIMB 48   /* a climb lands at least this far above the start's feet */
 
+/* The walk to a grapple route's start. Q3 fires only within 5 units of it
+ * and, inside 70, walks at 4 units/s per unit left (BotTravel_Grapple):
+ * 40 at 10 units. Quake II's ground friction (stopspeed 100) eats input that
+ * small, so the bot ran in place a few units short until the route timed
+ * out. Here: within IG_START_ARRIVED counts as there (the hook's own aim is
+ * from wherever the bot stands, and its path is traced before firing), and
+ * the approach never asks for less than IG_START_MINDIST's speed (160). */
+#define IG_START_ARRIVED 24
+#define IG_START_MINDIST 40
+float IG_GrappleStartDist(float dist)
+{
+	if (dist < IG_START_ARRIVED) return 0;
+	return dist < IG_START_MINDIST ? IG_START_MINDIST : dist;
+}
+
+/* A grapple route whose hook path is blocked. BotTravel_Grapple traces the
+ * line to the anchor before firing and reports a movement failure when it is
+ * not clear -- and the decision code answers a failure by clearing the
+ * avoided reachabilities (trap_BotResetAvoidReach, ai_dmnet.c), so the route
+ * planner chose the same hook again: the bot stood looking up, failing,
+ * forever. The trace is against the world only, so a blocked route stays
+ * blocked: after IG_BLOCKED_MAX failures it is taken out for the rest of the
+ * map (TRAVEL_INVALID, and the routing cache around it rebuilt). */
+#define IG_BLOCKED_MAX 2
+static unsigned char *ig_blocked;
+static int ig_blockedsize;
+
+void IG_GrappleBlocked(int reachnum)
+{
+	aas_reachability_t *r;
+
+	if (!ig_blocked || reachnum <= 0 || reachnum >= ig_blockedsize) return;
+	if (++ig_blocked[reachnum] < IG_BLOCKED_MAX) return;
+	r = &aasworld.reachability[reachnum];
+	if ((r->traveltype & TRAVELTYPE_MASK) != TRAVEL_GRAPPLEHOOK) return;
+	r->traveltype = (r->traveltype & ~TRAVELTYPE_MASK) | TRAVEL_INVALID;
+	AAS_RemoveRoutingCacheUsingArea(AAS_PointAreaNum(r->start));
+	botimport.Print(PRT_MESSAGE, "ig: grapple reachability %d blocked, taken out\n", reachnum);
+}
+
 /* Called once the AAS file is loaded, before the routing is initialised. */
 void IG_AdjustGrappleCosts(void)
 {
@@ -206,8 +275,13 @@ void IG_AdjustGrappleCosts(void)
 	vec3_t d;
 	aas_reachability_t *r;
 
+	free(ig_blocked);   /* libc, not the botlib's pools: it outlives nothing */
+	ig_blocked = NULL;
+	ig_blockedsize = 0;
 	start = LibVarGetValue("ig_rs_startgrapple");
 	if (start <= 0) return;
+	ig_blockedsize = aasworld.reachabilitysize;
+	ig_blocked = calloc(ig_blockedsize, 1);
 	climbonly = LibVarValue("ig_hookclimbonly", "1") != 0;
 	for (i = 0; i < aasworld.reachabilitysize; i++)
 	{

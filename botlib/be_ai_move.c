@@ -3012,7 +3012,7 @@ bot_moveresult_t BotTravel_Grapple(bot_movestate_t *ms, aas_reachability_t *reac
 		VectorSubtract(reach->end, ms->origin, dir);
 		dir[2] = 0;
 		dist = VectorLength(dir);
-		if (IG_HookDetect()) dist = IG_GrappleDist(ms->origin, ms->viewoffset, reach->end); /* IG: IG-6 */
+		if (IG_HookDetect()) dist = IG_GrappleDist(ms->client, ms->origin, ms->viewoffset, reach, ms->lastgrappledist); /* IG: IG-6 */
 		//if very close to the grapple end or the grappled is hooked and
 		//the bot doesn't get any closer
 		if (state && dist < 48)
@@ -3074,6 +3074,7 @@ bot_moveresult_t BotTravel_Grapple(bot_movestate_t *ms, aas_reachability_t *reac
 		if (IG_HookDetect()) IG_GrappleAim(org, reach->end, ms->viewoffset[2], ms->entitynum, viewdir); /* IG: IG-6 */
 		//
 		dist = VectorNormalize(dir);
+		if (IG_HookDetect()) dist = IG_GrappleStartDist(dist); /* IG: IG-6, no running in place */
 		Vector2Angles(viewdir, result.ideal_viewangles);
 		result.flags |= MOVERESULT_MOVEMENTVIEW;
 		//
@@ -3090,6 +3091,7 @@ bot_moveresult_t BotTravel_Grapple(bot_movestate_t *ms, aas_reachability_t *reac
 			VectorSubtract(reach->end, trace.endpos, dir);
 			if (VectorLength(dir) > 16)
 			{
+				if (IG_HookDetect()) IG_GrappleBlocked(ms->lastreachnum); /* IG: IG-6, no retry loop */
 				result.failure = true;
 				return result;
 			} //end if
@@ -3596,6 +3598,10 @@ void BotMoveToGoal(bot_moveresult_t *result, int movestate, bot_goal_t *goal, in
 	if (AAS_Swimming(ms->origin)) ms->moveflags |= MFL_SWIMMING;
 	//if against a ladder
 	if (AAS_AgainstLadder(ms->origin)) ms->moveflags |= MFL_AGAINSTLADDER;
+	//IG: IG-6. Q3's pull keeps a player airborne (PMF_GRAPPLE_PULL); an OSP pull can
+	//drag the bot along the ground, and the on-ground arm then re-routes from the
+	//new area and drops the hook. While its hook is out, it travels as if in the air.
+	if (IG_HookDetect() && (ms->moveflags & MFL_ACTIVEGRAPPLE)) ms->moveflags &= ~MFL_ONGROUND; /* IG: */
 	//if the bot is on the ground, swimming or against a ladder
 	if (ms->moveflags & (MFL_ONGROUND|MFL_SWIMMING|MFL_AGAINSTLADDER))
 	{
