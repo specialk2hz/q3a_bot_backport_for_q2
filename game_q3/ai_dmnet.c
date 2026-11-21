@@ -1751,6 +1751,7 @@ int AINode_Seek_NBG(bot_state_t *bs) {
 		bs->ideal_viewangles[2] *= 0.5;
 	}
 	//if the weapon is used for the bot movement
+	IG_Slingshot(bs, &goal, &moveresult); /* IG: jump, hook ahead, let go (IG-9) */
 	if (moveresult.flags & MOVERESULT_MOVEMENTWEAPON) bs->weaponnum = moveresult.weapon;
 	//if there is an enemy
 	if (BotFindEnemy(bs, -1)) {
@@ -2270,6 +2271,7 @@ int AINode_Battle_Chase(bot_state_t *bs)
 		bs->ideal_viewangles[2] *= 0.5;
 	}
 	//if the weapon is used for the bot movement
+	IG_Slingshot(bs, &goal, &moveresult); /* IG: jump, hook ahead, let go (IG-9) */
 	if (moveresult.flags & MOVERESULT_MOVEMENTWEAPON) bs->weaponnum = moveresult.weapon;
 	//if the bot is in the area the enemy was last seen in
 	if (bs->areanum == bs->lastenemyareanum) bs->chase_time = 0;
@@ -2463,6 +2465,7 @@ int AINode_Battle_Retreat(bot_state_t *bs) {
 		}
 	}
 	//if the weapon is used for the bot movement
+	IG_Slingshot(bs, &goal, &moveresult); /* IG: jump, hook ahead, let go (IG-9) */
 	if (moveresult.flags & MOVERESULT_MOVEMENTWEAPON) bs->weaponnum = moveresult.weapon;
 	//attack the enemy if possible
 	BotCheckAttack(bs);
@@ -2610,6 +2613,7 @@ int AINode_Battle_NBG(bot_state_t *bs) {
 		}
 	}
 	//if the weapon is used for the bot movement
+	IG_Slingshot(bs, &goal, &moveresult); /* IG: jump, hook ahead, let go (IG-9) */
 	if (moveresult.flags & MOVERESULT_MOVEMENTWEAPON) bs->weaponnum = moveresult.weapon;
 	//attack the enemy if possible
 	BotCheckAttack(bs);

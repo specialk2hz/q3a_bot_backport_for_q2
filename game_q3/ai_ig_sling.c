@@ -26,6 +26,9 @@ of the License, or (at your option) any later version.
  *      (OSP's half second between hooks, then aim and fire); back on the
  *      ground, it jumps again.
  *
+ * Called from every node that follows a route: seek LTG and NBG, battle chase,
+ * retreat and NBG (Billy hooks ~18 times a minute, fights included).
+ *
  * libvars (src/ig/ig_bot.c): ig_sling 1 turns it on (default 0), with IG-6's
  * hook wiring (ig_hookdetect). Lines "ig: slingshot <bot> ..." are what
  * igbench counts.
@@ -42,7 +45,7 @@ int  IG_HookNear(const vec3_t point, float radius, vec3_t hookpos);
 void EA_Jump(int client);
 
 #define IG_LOOKAHEAD     700    /* how far along the route it looks */
-#define IG_MIN_RUN       400    /* the route must run on this far, horizontally */
+#define IG_MIN_RUN       250    /* the route must run on this far, horizontally */
 #define IG_ANCHOR_MIN    180
 #define IG_ANCHOR_MAX    450
 #define IG_JUMP_AIM      0.15f  /* seconds into the jump to pick the anchor */
@@ -58,9 +61,9 @@ void EA_Jump(int client);
                                   * floor for a few degrees of aim; it is the bot's
                                   * hook if it is in front of it (IG_InFront) */
 #define IG_REHOOK        0.5f   /* OSP's hook_wait: the soonest it can hook again */
-#define IG_CHAIN_WINDOW  1.5f   /* in the air this long after a let-go, it may chain */
-#define IG_CHAIN_CHANCE  0.6f   /* how often it does (Billy: 59%) */
-#define IG_COOLDOWN      1.5f   /* after a sequence ends, before the next jump */
+#define IG_CHAIN_WINDOW  2.0f   /* in the air this long after a let-go, it may chain */
+#define IG_CHAIN_CHANCE  0.85f  /* how often it does (Billy: 59% within 1.5 s, at 18 hooks a minute) */
+#define IG_COOLDOWN      0.6f   /* after a sequence ends, before the next jump */
 
 enum { IG_SLING_IDLE, IG_SLING_JUMPED, IG_SLING_AIMING, IG_SLING_HOOKED, IG_SLING_AFTER };
 
@@ -192,12 +195,12 @@ void IG_Slingshot(bot_state_t *bs, bot_goal_t *goal, bot_moveresult_t *moveresul
 		if (FloatTime() < s->cooldown || !IG_OnGround(bs)) return;
 		if ((moveresult->traveltype & TRAVELTYPE_MASK) != TRAVEL_WALK) return;
 		if (moveresult->flags & (MOVERESULT_MOVEMENTVIEWSET | MOVERESULT_WAITING | MOVERESULT_ONTOPOFOBSTACLE)) return;
-		if (speed < 200 || !IG_RouteAhead(bs, goal, target)) return;
+		if (speed < 150 || !IG_RouteAhead(bs, goal, target)) return;
 		/* running the way the route goes */
 		VectorSubtract(target, bs->origin, d);
 		d[2] = 0;
 		VectorNormalize(d);
-		if (DotProduct(d, bs->cur_ps.velocity) < 0.8f * speed) return;
+		if (DotProduct(d, bs->cur_ps.velocity) < 0.6f * speed) return;
 		EA_Jump(c);
 		s->state = IG_SLING_JUMPED;
 		s->time = FloatTime();
