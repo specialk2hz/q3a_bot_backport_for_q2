@@ -20,6 +20,7 @@ int  IG_LastEvidence(int bot, int enemy, vec3_t pos, float *time);
 
 /* ai_ig_sling.c */
 void IG_Slingshot(bot_state_t *bs, bot_goal_t *goal, bot_moveresult_t *moveresult);
+void IG_CombatHook(bot_state_t *bs);
 
 /* ai_ig_revenge.c */
 int  IG_RevengeTarget(bot_state_t *bs);

@@ -298,3 +298,142 @@ void IG_Slingshot(bot_state_t *bs, bot_goal_t *goal, bot_moveresult_t *moveresul
 		return;
 	}
 }
+
+/* ------------------------------------------------------------------------
+ * Combat hook (IG-10): a hook mid-fight, for a better angle or to be
+ * harder to hit -- what Billy does. From AINode_Battle_Fight, after the bot
+ * has aimed and maybe fired (BotCheckAttack).
+ *
+ * Mostly right after a shot (the railgun's reload is the free moment):
+ * with the enemy in view 250-1800 units away and IG_FIGHT_COOLDOWN since
+ * the last one, it picks a short anchor (180-450) diagonally sideways and
+ * up -- within 55 degrees of where it already looks, because a bot turns no
+ * faster than its character lets it -- jumps if on the ground, hooks, rides
+ * about a quarter second, lets go, and its aim goes back to the enemy.
+ * libvar ig_fighthook 1 (default 0), with the slingshot's hook wiring.
+ * Lines "ig: fighthook <bot> ..." are what igbench counts.
+ * ------------------------------------------------------------------------ */
+
+#define IG_FIGHT_COOLDOWN 2.5f
+#define IG_FIGHT_PULL     0.25f
+#define IG_FIGHT_CHANCE   0.5f  /* per think, just after a shot */
+#define IG_FIGHT_IDLE     0.03f /* per think otherwise */
+
+enum { IG_FIGHT_NONE, IG_FIGHT_AIMING, IG_FIGHT_HOOKED };
+
+typedef struct {
+	int    state;
+	float  time, cooldown, latched;
+	vec3_t anchor, latchpos;
+	float  remain;
+} ig_fight_t;
+
+static ig_fight_t ig_fight[MAX_CLIENTS];
+
+static int IG_FightAnchor(bot_state_t *bs, vec3_t anchor)
+{
+	/* sideways and up first: height for the angle, sideways to be missed */
+	static const float yaws[] = { 40, -40, 55, -55, 25, -25 };
+	static const float pitches[] = { 15, 5, 28 };
+	vec3_t dir, end, mid, down, angles;
+	vec3_t mins = {-16, -16, -24}, maxs = {16, 16, 32};
+	bsp_trace_t tr;
+	float d, side = random() < 0.5f ? 1 : -1;
+	int i, j;
+
+	for (i = 0; i < (int)(sizeof(yaws) / sizeof(yaws[0])); i++) {
+		for (j = 0; j < (int)(sizeof(pitches) / sizeof(pitches[0])); j++) {
+			VectorCopy(bs->viewangles, angles);
+			angles[YAW] += side * yaws[i];
+			angles[PITCH] = -pitches[j];
+			AngleVectors(angles, dir, NULL, NULL);
+			VectorMA(bs->eye, IG_ANCHOR_MAX, dir, end);
+			BotAI_Trace(&tr, bs->eye, NULL, NULL, end, bs->entitynum, MASK_SOLID);
+			if (tr.fraction >= 1 || tr.startsolid || (tr.surface.flags & SURF_SKY)) continue;
+			d = tr.fraction * IG_ANCHOR_MAX;
+			if (d < IG_ANCHOR_MIN) continue;
+			VectorMA(bs->origin, 0.5f * d, dir, mid);
+			BotAI_Trace(&tr, bs->origin, mins, maxs, mid, bs->entitynum, MASK_SOLID);
+			if (tr.fraction < 1) continue;
+			VectorCopy(mid, down);
+			down[2] -= 700;
+			BotAI_Trace(&tr, mid, NULL, NULL, down, bs->entitynum, MASK_SOLID | CONTENTS_LAVA | CONTENTS_SLIME);
+			if (tr.fraction >= 1 || (tr.contents & (CONTENTS_LAVA | CONTENTS_SLIME))) continue;
+			VectorMA(bs->eye, d, dir, anchor);
+			return 1;
+		}
+	}
+	return 0;
+}
+
+void IG_CombatHook(bot_state_t *bs)
+{
+	ig_fight_t *f;
+	aas_entityinfo_t self, enemy;
+	vec3_t d, hookpos;
+	float dist, speed;
+	int c = bs->client;
+
+	if (c < 0 || c >= MAX_CLIENTS || !trap_Cvar_VariableIntegerValue("ig_fighthook") ||
+		!trap_Cvar_VariableIntegerValue("ig_hookdetect")) return;
+	f = &ig_fight[c];
+	if (f->time > FloatTime() + 1 || f->cooldown > FloatTime() + IG_FIGHT_COOLDOWN + 5) memset(f, 0, sizeof(*f));
+	if (ig_sling[c].state != IG_SLING_IDLE && ig_sling[c].state != IG_SLING_AFTER) return;   /* a slingshot is on */
+	speed = VectorLength(bs->cur_ps.velocity);
+
+	switch (f->state) {
+	case IG_FIGHT_NONE:
+		if (FloatTime() < f->cooldown || bs->enemy < 0 || bs->enemyvisible_time < FloatTime() - 0.2f) return;
+		BotEntityInfo(bs->enemy, &enemy);
+		if (!enemy.valid) return;
+		VectorSubtract(enemy.origin, bs->origin, d);
+		dist = VectorLength(d);
+		if (dist < 250 || dist > 1800) return;
+		BotEntityInfo(bs->client, &self);
+		if (random() > (EntityIsShooting(&self) ? IG_FIGHT_CHANCE : IG_FIGHT_IDLE)) return;
+		if (!IG_FightAnchor(bs, f->anchor)) {
+			f->cooldown = FloatTime() + 0.5f;
+			return;
+		}
+		if (IG_OnGround(bs)) EA_Jump(c);
+		f->state = IG_FIGHT_AIMING;
+		f->time = FloatTime();
+		/* fall through */
+	case IG_FIGHT_AIMING:
+		IG_ViewAt(bs, f->anchor);
+		if (FloatTime() - f->time > 0.4f) {
+			f->state = IG_FIGHT_NONE;
+			f->cooldown = FloatTime() + IG_FIGHT_COOLDOWN;
+			return;
+		}
+		if (!IG_Aimed(bs)) return;
+		trap_EA_Command(c, LibVarGetString("cmd_grappleon"));
+		IG_GrappleTravelNote(c);
+		BotAI_Print(PRT_MESSAGE, "ig: fighthook %d\n", c);
+		f->state = IG_FIGHT_HOOKED;
+		f->time = FloatTime();
+		f->latched = 0;
+		return;
+	case IG_FIGHT_HOOKED:
+		IG_GrappleTravelNote(c);
+		if (!f->latched) {
+			if (IG_HookNear(f->anchor, IG_LATCH_RADIUS, hookpos) == 2) {
+				VectorCopy(hookpos, f->anchor);
+				f->latched = FloatTime();
+				VectorCopy(bs->origin, f->latchpos);
+				VectorSubtract(f->anchor, bs->eye, d);
+				f->remain = VectorLength(d);
+			}
+			else if (FloatTime() - f->time < IG_FLY_MAX) return;
+		}
+		VectorSubtract(bs->origin, f->latched ? f->latchpos : bs->origin, d);
+		dist = VectorLength(d);
+		if (f->latched && dist < 0.5f * f->remain && FloatTime() - f->latched < IG_FIGHT_PULL && speed > IG_STALL_SPEED)
+			return;     /* still riding it; the AI aims at the enemy meanwhile */
+		trap_EA_Command(c, LibVarGetString("cmd_grappleoff"));
+		BotAI_Print(PRT_MESSAGE, "ig: fighthook release %d latched %d speed %.0f\n", c, f->latched > 0, speed);
+		f->state = IG_FIGHT_NONE;
+		f->cooldown = FloatTime() + IG_FIGHT_COOLDOWN;
+		return;
+	}
+}
