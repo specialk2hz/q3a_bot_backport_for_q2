@@ -214,6 +214,16 @@ static int IG_OnGround(bot_state_t *bs)
 	return bs->cur_ps.groundEntityNum != ENTITYNUM_NONE;
 }
 
+/* In a jump pad's flight: the pad hook's, and no other hook's. Slingshot
+ * chains and combat hooks fired in the arc hooked the floor below and short
+ * of the landing (Billy, q2rdm11's big room). */
+static int IG_InPadFlight(bot_state_t *bs)
+{
+	vec3_t land;
+
+	return !IG_OnGround(bs) && IG_PadFlight(bs->client, land);
+}
+
 #define IG_LIQUIDS (CONTENTS_LAVA | CONTENTS_SLIME)
 
 /* A trace to an anchor that also sees lava and slime: MASK_SOLID passes
@@ -681,6 +691,7 @@ static void IG_HookMove(bot_state_t *bs, int infight)
 
 	switch (f->state) {
 	case IG_FIGHT_NONE:
+		if (IG_InPadFlight(bs)) return;     /* the urge keeps for the landing */
 		if (f->urge) {
 			/* a reposition: no enemy needed, no cooldown */
 			f->urge = 0;
@@ -1035,12 +1046,13 @@ static int IG_PadHook(bot_state_t *bs)
 	case IG_PAD_NONE:
 		if (IG_OnGround(bs) || !IG_PadFlight(c, land)) {
 			if (ig_pad[c].start > 0 && IG_OnGround(bs))
-				BotAI_Print(PRT_MESSAGE, "ig: padflight %d plain %.2f dist %.0f\n", c, FloatTime() - ig_pad[c].start, ig_pad[c].dist0);
+				BotAI_Print(PRT_MESSAGE, "ig: padflight %d plain %.2f dist %.0f land %.0f %.0f %.0f at %.0f %.0f %.0f\n", c, FloatTime() - ig_pad[c].start, ig_pad[c].dist0, ig_pad[c].land[0], ig_pad[c].land[1], ig_pad[c].land[2], bs->origin[0], bs->origin[1], bs->origin[2]);
 			ig_pad[c].start = 0;
 			return 0;
 		}
 		if (ig_pad[c].start <= 0) {
 			ig_pad[c].start = FloatTime();
+			VectorCopy(land, ig_pad[c].land);
 			VectorSubtract(land, bs->origin, d);
 			d[2] = 0;
 			ig_pad[c].dist0 = VectorLength(d);
@@ -1212,6 +1224,12 @@ void IG_Slingshot(bot_state_t *bs, bot_goal_t *goal, bot_moveresult_t *moveresul
 	int c = bs->client;
 
 	if (IG_PadHook(bs)) return;      /* IG-13: flying a pad, hooking its landing */
+	if (c >= 0 && c < MAX_CLIENTS && IG_InPadFlight(bs)) {
+		/* a chain ends at a pad; the pad carries the bot from here */
+		if (ig_sling[c].state != IG_SLING_IDLE && ig_sling[c].state != IG_SLING_HOOKED) IG_SlingEnd(&ig_sling[c]);
+		ig_strafe[c].on = 0;
+		if (ig_sling[c].state == IG_SLING_IDLE) return;
+	}
 	if (IG_PadApproach(bs, goal, moveresult)) return;     /* IG-13: hooking INTO a pad */
 	IG_SlingshotStep(bs, goal, moveresult);
 	if (c < 0 || c >= MAX_CLIENTS) return;
