@@ -153,7 +153,13 @@ int IG_GrappleState(const vec3_t origin, const vec3_t viewoffset, const vec3_t a
 #define IG_HOLD_MAX  1.5f
 static float ig_hookout[MAX_CLIENTS];
 
-float IG_GrappleDist(int client, const vec3_t origin, const vec3_t viewoffset, const struct aas_reachability_s *reach, float last)
+/* The route a bot is hooking on, for the outcome check in the watchdog. */
+static int   ig_hookreach[MAX_CLIENTS];   /* reachability of the hook now out, 0: none */
+static float ig_hookseen[MAX_CLIENTS];    /* last frame it was active */
+static int   ig_checkreach[MAX_CLIENTS];  /* a finished hook being checked */
+static float ig_checkuntil[MAX_CLIENTS];
+
+float IG_GrappleDist(int client, int reachnum, const vec3_t origin, const vec3_t viewoffset, const struct aas_reachability_s *reach, float last)
 {
 	vec3_t eye, d, below;
 	float real;
@@ -162,6 +168,8 @@ float IG_GrappleDist(int client, const vec3_t origin, const vec3_t viewoffset, c
 	VectorSubtract(reach->end, eye, d);
 	real = VectorLength(d);
 	if (client < 0 || client >= MAX_CLIENTS) return real;
+	ig_hookreach[client] = reachnum;
+	ig_hookseen[client] = AAS_Time();
 	/* BotTravel_Grapple sets lastgrappledist to 999999 when it fires */
 	if (last > 99999) ig_hookout[client] = AAS_Time();
 	VectorCopy(origin, below);
@@ -213,9 +221,54 @@ void IG_GrappleTravelNote(int client)
 	if (client >= 0 && client < MAX_CLIENTS) ig_grapplenote[client] = AAS_Time();
 }
 
+static void IG_RouteFailed(int reachnum);
+
+/* Did the hook deliver? From the frame a bot's hook stops being travelled,
+ * it has IG_LAND_TIME seconds to be in the route's landing area. A bot that
+ * dies meanwhile proves nothing either way. A route that fails twice is
+ * taken out for the map (IG_RouteFailed): bspc cannot tell that OSP's hang,
+ * up to 64 units out from the wall, leaves a narrow ledge out of reach. */
+#define IG_LAND_TIME 1.5f
+static void IG_HookOutcome(int client)
+{
+	aas_entityinfo_t e;
+	int reach;
+
+	if (ig_hookreach[client] && AAS_Time() - ig_hookseen[client] > 0.25f)
+	{
+		ig_checkreach[client] = ig_hookreach[client];
+		ig_checkuntil[client] = AAS_Time() + IG_LAND_TIME;
+		ig_hookreach[client] = 0;
+	}
+	reach = ig_checkreach[client];
+	if (!reach) return;
+	if (AAS_Time() > ig_checkuntil[client] + 5 || reach >= aasworld.reachabilitysize)
+	{   /* a new map */
+		ig_checkreach[client] = 0;
+		return;
+	}
+	AAS_EntityInfo(client, &e);
+	if (!e.valid || (e.flags & 1 /* EF_DEAD */))
+	{
+		ig_checkreach[client] = 0;
+		return;
+	}
+	if (AAS_PointAreaNum(e.origin) == aasworld.reachability[reach].areanum)
+	{
+		ig_checkreach[client] = 0;
+		return;
+	}
+	if (AAS_Time() > ig_checkuntil[client])
+	{
+		ig_checkreach[client] = 0;
+		IG_RouteFailed(reach);
+	}
+}
+
 void IG_GrappleWatchdog(int client)
 {
 	if (!IG_HookDetect() || client < 0 || client >= MAX_CLIENTS) return;
+	IG_HookOutcome(client);
 	if (ig_grapplenote[client] <= 0) return;
 	/* a new map restarts the clock */
 	if (AAS_Time() < ig_grapplenote[client]) { ig_grapplenote[client] = 0; return; }
@@ -254,7 +307,7 @@ float IG_GrappleStartDist(float dist)
 static unsigned char *ig_blocked;
 static int ig_blockedsize;
 
-void IG_GrappleBlocked(int reachnum)
+static void IG_TakeOut(int reachnum, const char *why)
 {
 	aas_reachability_t *r;
 
@@ -264,7 +317,17 @@ void IG_GrappleBlocked(int reachnum)
 	if ((r->traveltype & TRAVELTYPE_MASK) != TRAVEL_GRAPPLEHOOK) return;
 	r->traveltype = (r->traveltype & ~TRAVELTYPE_MASK) | TRAVEL_INVALID;
 	AAS_RemoveRoutingCacheUsingArea(AAS_PointAreaNum(r->start));
-	botimport.Print(PRT_MESSAGE, "ig: grapple reachability %d blocked, taken out\n", reachnum);
+	botimport.Print(PRT_MESSAGE, "ig: grapple reachability %d %s, taken out\n", reachnum, why);
+}
+
+void IG_GrappleBlocked(int reachnum)
+{
+	IG_TakeOut(reachnum, "blocked");
+}
+
+static void IG_RouteFailed(int reachnum)
+{
+	IG_TakeOut(reachnum, "did not land");
 }
 
 /* Called once the AAS file is loaded, before the routing is initialised. */

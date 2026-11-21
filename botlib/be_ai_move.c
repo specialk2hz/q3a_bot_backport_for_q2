@@ -3012,7 +3012,7 @@ bot_moveresult_t BotTravel_Grapple(bot_movestate_t *ms, aas_reachability_t *reac
 		VectorSubtract(reach->end, ms->origin, dir);
 		dir[2] = 0;
 		dist = VectorLength(dir);
-		if (IG_HookDetect()) dist = IG_GrappleDist(ms->client, ms->origin, ms->viewoffset, reach, ms->lastgrappledist); /* IG: IG-6 */
+		if (IG_HookDetect()) dist = IG_GrappleDist(ms->client, ms->lastreachnum, ms->origin, ms->viewoffset, reach, ms->lastgrappledist); /* IG: IG-6 */
 		//if very close to the grapple end or the grappled is hooked and
 		//the bot doesn't get any closer
 		if (state && dist < 48)

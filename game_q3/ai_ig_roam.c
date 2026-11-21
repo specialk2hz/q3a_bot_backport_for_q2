@@ -21,6 +21,7 @@ of the License, or (at your option) any later version.
  * libvars (set by the game, src/ig/ig_bot.c):
  *   ig_roam          1: replace the random goal (default 0)
  *   ig_hunt_memory   seconds a trace is worth hunting (default 10)
+ *   ig_debug         1: the bot says in chat what goal it chose and why
  * High ground and patrol goals are the next steps; without a fresh trace the
  * random goal stays for now.
  */
@@ -40,6 +41,7 @@ of the License, or (at your option) any later version.
 typedef struct {
 	vec3_t pos;
 	float  time;                /* 0: never */
+	int    kind;                /* IG_SEEN, IG_HEARD, IG_KILLEDBY */
 } ig_trace_t;
 
 static ig_trace_t ig_traces[MAX_CLIENTS][MAX_CLIENTS];   /* [bot][enemy] */
@@ -58,11 +60,30 @@ static float IG_HuntMemory(void)
 	return m > 0 ? m : 10;
 }
 
-void IG_Evidence(int bot, int enemy, const vec3_t pos)
+void IG_EvidenceKind(int bot, int enemy, const vec3_t pos, int kind)
 {
 	if (bot < 0 || bot >= MAX_CLIENTS || enemy < 0 || enemy >= MAX_CLIENTS) return;
 	VectorCopy(pos, ig_traces[bot][enemy].pos);
 	ig_traces[bot][enemy].time = FloatTime();
+	ig_traces[bot][enemy].kind = kind;
+}
+
+void IG_Evidence(int bot, int enemy, const vec3_t pos)
+{
+	IG_EvidenceKind(bot, enemy, pos, IG_KILLEDBY);
+}
+
+/* ig_debug: say it, so a person in the game can judge the choice. */
+void IG_Debug(bot_state_t *bs, const char *fmt, ...)
+{
+	va_list ap;
+	char buf[256];
+
+	if (!trap_Cvar_VariableIntegerValue("ig_debug")) return;
+	va_start(ap, fmt);
+	Q_vsnprintf(buf, sizeof(buf), fmt, ap);
+	va_end(ap);
+	trap_EA_Say(bs->client, buf);
 }
 
 int IG_LastEvidence(int bot, int enemy, vec3_t pos, float *time)
@@ -100,10 +121,10 @@ void IG_RoamThink(bot_state_t *bs)
 		VectorSubtract(entinfo.origin, bs->origin, dir);
 		dist = VectorLength(dir);
 		if (EntityIsShooting(&entinfo) && dist < IG_HEAR_DIST)
-			IG_Evidence(c, i, entinfo.origin);
+			IG_EvidenceKind(c, i, entinfo.origin, IG_HEARD);
 		else if (dist < IG_SEE_DIST &&
 				 BotEntityVisible(bs->entitynum, bs->eye, bs->viewangles, IG_SEE_FOV, i) > 0)
-			IG_Evidence(c, i, entinfo.origin);
+			IG_EvidenceKind(c, i, entinfo.origin, IG_SEEN);
 	}
 	if (!ig_hunting[c]) return;
 	/* pass through: choose the next goal before arriving */
@@ -171,9 +192,22 @@ void IG_RoamReplace(bot_state_t *bs, int tfl)
 	 * item_botroam goal is GFL_ROAM with an item number) */
 	if (!(goal.flags & GFL_ROAM) || goal.number != 0) return;
 	enemy = IG_HuntTrace(bs, pos, &time);
-	if (enemy < 0) return;
+	if (enemy < 0) {
+		IG_Debug(bs, "nothing fresh to hunt, wandering");
+		return;
+	}
 	area = BotPointAreaNum(pos);
 	if (!area) return;
+	{
+		static const char *how[] = { "", "saw", "heard", "was killed by" };
+		char name[64];
+		int k = ig_traces[c][enemy].kind;
+
+		IG_Debug(bs, "%shunting %s: %s them %.0f s ago",
+				 IG_RevengeTarget(bs) == enemy ? "REVENGE: " : "",
+				 ClientName(enemy, name, sizeof(name)), how[k >= 1 && k <= 3 ? k : 0],
+				 FloatTime() - time);
+	}
 	trap_BotPopGoal(bs->gs);
 	memset(&goal, 0, sizeof(goal));
 	VectorCopy(pos, goal.origin);

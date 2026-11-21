@@ -7,7 +7,12 @@
 /* ai_ig_roam.c */
 void IG_RoamThink(bot_state_t *bs);
 void IG_RoamReplace(bot_state_t *bs, int tfl);
+#define IG_SEEN     1
+#define IG_HEARD    2
+#define IG_KILLEDBY 3
 void IG_Evidence(int bot, int enemy, const vec3_t pos);
+void IG_EvidenceKind(int bot, int enemy, const vec3_t pos, int kind);
+void IG_Debug(bot_state_t *bs, const char *fmt, ...);
 int  IG_LastEvidence(int bot, int enemy, vec3_t pos, float *time);
 
 /* ai_ig_revenge.c */

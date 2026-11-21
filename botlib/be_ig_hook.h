@@ -16,6 +16,6 @@ void IG_GrappleBlocked(int reachnum);
 void IG_GrappleAim(const vec3_t eye, const vec3_t anchor, float lift, int passent, vec3_t viewdir);
 void IG_GrappleWatchdog(int client);
 struct aas_reachability_s;
-float IG_GrappleDist(int client, const vec3_t origin, const vec3_t viewoffset, const struct aas_reachability_s *reach, float last);
+float IG_GrappleDist(int client, int reachnum, const vec3_t origin, const vec3_t viewoffset, const struct aas_reachability_s *reach, float last);
 
 #endif
