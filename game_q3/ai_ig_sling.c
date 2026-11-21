@@ -45,25 +45,28 @@ void IG_NoteHookFire(int client);
 int  IG_CanFireHook(int client);
 int  IG_HookNear(const vec3_t point, float radius, vec3_t hookpos);
 void EA_Jump(int client);
+/* game_q3/ai_main.c. Undeclared, C took it for an int function and every
+ * aim check here read garbage: hooks left up to 90 degrees off their anchor. */
+float AngleDifference(float ang1, float ang2);
 
 #define IG_LOOKAHEAD     700    /* how far along the route it looks */
-#define IG_MIN_RUN       250    /* the route must run on this far, horizontally */
-#define IG_ANCHOR_MIN    180
-#define IG_ANCHOR_MAX    700
+#define IG_MIN_RUN       160    /* the route must run on this far, horizontally */
+#define IG_ANCHOR_MIN    120
+#define IG_ANCHOR_MAX    650
 #define IG_JUMP_AIM      0.15f  /* seconds into the jump to pick the anchor */
-#define IG_AIM_TIME      0.5f   /* seconds to get aimed and fire */
-#define IG_AIM_TOL       4      /* degrees: looser was sloppy -- misses that drop the bot */
-#define IG_FLY_MAX       0.4f   /* seconds for the hook to latch (a short throw) */
+#define IG_AIM_TIME      0.7f   /* seconds to get aimed and fire */
+#define IG_AIM_TOL       8      /* degrees, now that the check works (AngleDifference) */
+#define IG_FLY_MAX       0.55f  /* seconds for the hook to latch: 650 units at 1650 u/s is 0.4 */
 #define IG_RELEASE_FRAC  0.6f   /* let go this far along the pull ... */
 #define IG_RELEASE_SPEED 900    /* ... or this fast, after a moment's pull */
-#define IG_HOOK_MAX      0.35f  /* seconds pulled at most, from the latch */
+#define IG_HOOK_MAX      0.15f  /* seconds pulled, from the latch: grapple and QUICKLY let go (Billy) */
 #define IG_STALL_SPEED   150    /* pulled but this slow: the body is caught */
 #define IG_LATCH_RADIUS  650    /* how far from the aimed anchor the hook may latch: a
                                   * floor hook at a shallow angle lands far along the
                                   * floor for a few degrees of aim; it is the bot's
                                   * hook if it is in front of it (IG_InFront) */
 #define IG_REHOOK        0.5f   /* OSP's hook_wait: the soonest it can hook again */
-#define IG_CHAIN_WINDOW  2.5f   /* in the air this long after a let-go, it may chain */
+#define IG_CHAIN_WINDOW  4.0f   /* in the air this long after a let-go, it may chain */
 #define IG_CHAIN_CHANCE  0.95f  /* how often it does (Billy: 59% within 1.5 s, at 18 hooks a minute) */
 #define IG_COOLDOWN      0.4f   /* after a sequence ends, before the next jump */
 
@@ -90,7 +93,7 @@ static ig_sling_t ig_sling[MAX_CLIENTS];
  * up to IG_HOP_MAX times. */
 #define IG_HOP_TIME   1.5f
 #define IG_HOP_SPEED  350
-#define IG_HOP_MAX    3
+#define IG_HOP_MAX    2      /* Billy: about two jumps, then stop or sling again */
 static float ig_hopuntil[MAX_CLIENTS];
 static int   ig_hops[MAX_CLIENTS];
 
@@ -166,38 +169,45 @@ static void IG_ViewAt(bot_state_t *bs, const vec3_t p)
 	bs->flags |= BFL_IDEALVIEWSET;
 }
 
-static int IG_AimedNow(bot_state_t *bs, float tol)
+/* A flick, the way a player snaps onto a hook spot: the view jumps to the
+ * spot instead of easing in (Q3's view turn covers a fraction of what is left
+ * each think, so a 20-30 degree tip took most of a jump: 5 000 slingshot aims
+ * of 16 000 ran out of time in a test). */
+static void IG_FlickAt(bot_state_t *bs, const vec3_t p)
 {
-	return fabs(AngleDifference(bs->viewangles[0], bs->ideal_viewangles[0])) < tol &&
-		   fabs(AngleDifference(bs->viewangles[1], bs->ideal_viewangles[1])) < tol;
+	int i;
+
+	IG_ViewAt(bs, p);
+	/* the view turn keeps an angular speed between server frames
+	 * (BotChangeViewAngles): left in, it carried the view on past the flick
+	 * -- the game fired 14 degrees down asked, -2 to -7 got */
+	for (i = 0; i < 2; i++) {
+		bs->viewangles[i] = AngleMod(bs->ideal_viewangles[i]);
+		bs->viewanglespeed[i] = 0;
+	}
 }
 
-/* Aimed, and already aimed the think before. A client command (the hook)
- * runs at once, with the view the GAME has -- the last usercmd's --, while
- * the brain's view is this think's: firing the think it first got aimed
- * sent the hook along last frame's view, past the anchor (63% of the
- * slingshots that never latched). */
-static float ig_aimedsince[MAX_CLIENTS];
-static int IG_AimedFor(bot_state_t *bs, float tol)
+/* Flick onto p; true on the think AFTER a flick onto it, when the game's view
+ * (the last usercmd's) is the flicked one and a hook can go. A think spent in
+ * between with another view (a node change, the battle aim) starts it over:
+ * hooks fired then flew where the bot had been looking. Every hook a bot
+ * aims goes through this: aiming by the eased view turn took up to 0.7 s,
+ * mid-fight looking away from the enemy -- rail accuracy 48% -> 36%. */
+static float ig_flicked[MAX_CLIENTS];
+static int IG_FlickReady(bot_state_t *bs, const vec3_t p)
 {
 	int c = bs->client;
+	float since;
+	int ready;
 
 	if (c < 0 || c >= MAX_CLIENTS) return 0;
-	if (!IG_AimedNow(bs, tol)) {
-		ig_aimedsince[c] = 0;
-		return 0;
-	}
-	if (ig_aimedsince[c] <= 0 || ig_aimedsince[c] > FloatTime()) {
-		ig_aimedsince[c] = FloatTime();
-		return 0;
-	}
-	return FloatTime() > ig_aimedsince[c];
+	since = FloatTime() - ig_flicked[c];
+	ready = ig_flicked[c] > 0 && since > 0.001f && since < 0.15f;
+	IG_FlickAt(bs, p);
+	ig_flicked[c] = FloatTime();
+	return ready;
 }
 
-static int IG_Aimed(bot_state_t *bs)
-{
-	return IG_AimedFor(bs, IG_AIM_TOL);
-}
 
 static int IG_OnGround(bot_state_t *bs)
 {
@@ -256,7 +266,6 @@ static int IG_SafeCorridor(bot_state_t *bs, const vec3_t flat, float length)
 }
 
 int IG_LavaEscape(bot_state_t *bs);
-static void IG_RepositionHook(bot_state_t *bs);
 
 /* Where the route goes: a point IG_LOOKAHEAD along it, if it runs far
  * enough. */
@@ -273,48 +282,52 @@ static int IG_RouteAhead(bot_state_t *bs, bot_goal_t *goal, vec3_t target)
 /* An anchor ahead toward `target`, from where the bot is now. */
 static int IG_FindAnchor(bot_state_t *bs, const vec3_t target, vec3_t anchor)
 {
-	/* above and below eye level, Billy's middle first */
-	static const float pitches[] = { -12, -4, -18, 4, 12 };
-	vec3_t dir, flat, end, mid, angles;
+	/* Billy's slingshot: the FLOOR ahead, 10-22 degrees down, straight the way
+	 * the bot is moving -- so it only tips its view down, never has to turn
+	 * (sideways and overhead anchors, which it could not turn to in time,
+	 * are the combat hook's and the climbs'). His middle first. */
+	static const float pitches[] = { 14, 18, 10, 24, 8, 30 };
+	static const float yaws[] = { 0, 12, -12, 25, -25 };
+	vec3_t dir, flat, end, mid, angles, v;
 	vec3_t mins = {-16, -16, -24}, maxs = {16, 16, 32};
 	bsp_trace_t tr;
-	float d;
-	int i;
+	float d, baseyaw;
+	int i, k;
 
-	/* straight along the route first, then up to 30 degrees either side: a
-	 * person glances for the nearest wall to take (chains ended for want of
-	 * an anchor dead ahead: 654 of 2 100 in a test) */
-	static const float yaws[] = { 0, 15, -15, 30, -30 };
-	float routeyaw;
-	int k;
-
-	VectorSubtract(target, bs->eye, flat);
-	flat[2] = 0;
-	if (VectorNormalize(flat) < IG_ANCHOR_MIN) return 0;
-	vectoangles(flat, angles);
-	routeyaw = angles[YAW];
-	for (k = 0; k < 25; k++) {
-		i = k % 5;
-		angles[YAW] = routeyaw + yaws[k / 5];
-		angles[PITCH] = -pitches[i];
-		AngleVectors(angles, dir, NULL, NULL);
-		AngleVectors(angles, flat, NULL, NULL);
-		flat[2] = 0;
-		VectorNormalize(flat);
-		VectorMA(bs->eye, IG_ANCHOR_MAX, dir, end);
-		if (!IG_AnchorTrace(bs, end, &tr)) continue;
-		d = tr.fraction * IG_ANCHOR_MAX;
-		if (d < IG_ANCHOR_MIN) continue;
-		/* the body's path to the release point must be clear */
-		VectorMA(bs->origin, IG_RELEASE_FRAC * d, dir, mid);
-		BotAI_Trace(&tr, bs->origin, mins, maxs, mid, bs->entitynum, MASK_SOLID | IG_LIQUIDS);
-		if (tr.fraction < 1) continue;
-		/* safe floor (not a pit, not lava) under the let-go, the anchor, and
-		 * beyond, where the speed it keeps carries it */
-		if (!IG_SafeGround(bs, mid)) continue;
-		if (!IG_SafeCorridor(bs, flat, d + 300)) continue;
-		VectorMA(bs->eye, d, dir, anchor);
-		return 1;
+	(void)target;
+	/* around the way it moves (the flick turns the view there) */
+	VectorCopy(bs->cur_ps.velocity, v);
+	v[2] = 0;
+	baseyaw = bs->viewangles[YAW];
+	if (VectorNormalize(v) > 100) {
+		vectoangles(v, angles);
+		baseyaw = angles[YAW];
+	}
+	for (k = 0; k < 5; k++) {
+		for (i = 0; i < 6; i++) {
+			VectorSet(angles, pitches[i], baseyaw + yaws[k], 0);
+			AngleVectors(angles, dir, NULL, NULL);
+			VectorSet(flat, dir[0], dir[1], 0);
+			VectorNormalize(flat);
+			VectorMA(bs->eye, IG_ANCHOR_MAX, dir, end);
+			if (!IG_AnchorTrace(bs, end, &tr)) continue;
+			d = tr.fraction * IG_ANCHOR_MAX;
+			if (d < IG_ANCHOR_MIN) continue;
+			/* floor first; a wall straight ahead does too when it is far enough
+			 * off that the short pull ends long before it (corridor maps: the
+			 * line down hit the end wall before the floor 9 of 10 times) */
+			if (tr.plane.normal[2] < 0.7f && (tr.plane.normal[2] < -0.3f || d < 250)) continue;
+			/* the body's path to the release point must be clear: level, not
+			 * along the hook line -- a floor anchor's line runs into the floor,
+			 * and the pull carries the body forward over it */
+			VectorMA(bs->origin, IG_RELEASE_FRAC * d, flat, mid);
+			BotAI_Trace(&tr, bs->origin, mins, maxs, mid, bs->entitynum, MASK_SOLID | IG_LIQUIDS);
+			if (tr.fraction < 1) continue;
+			/* safe floor all the way the speed will carry it */
+			if (!IG_SafeCorridor(bs, flat, d + 300)) continue;
+			VectorMA(bs->eye, d, dir, anchor);
+			return 1;
+		}
 	}
 	return 0;
 }
@@ -347,9 +360,17 @@ static void IG_SlingshotStep(bot_state_t *bs, bot_goal_t *goal, bot_moveresult_t
 	int c = bs->client;
 
 	if (IG_LavaEscape(bs)) return;
-	IG_RepositionHook(bs);
-	if (c >= 0 && c < MAX_CLIENTS && ig_fight[c].state != IG_FIGHT_NONE) return;   /* a reposition is on */
-	if (c < 0 || c >= MAX_CLIENTS || !IG_SlingOn()) return;
+	if (c < 0 || c >= MAX_CLIENTS) return;
+	/* travelling, a reposition asked for after a kill or two misses IS a
+	 * slingshot: one sooner, rather than the combat hook's sideways pull,
+	 * which took the slingshot's turns away (1 204 repositions against 46
+	 * slingshots in a test) */
+	if (ig_fight[c].urge) {
+		ig_fight[c].urge = 0;
+		if (ig_sling[c].state == IG_SLING_IDLE) ig_sling[c].cooldown = 0;
+	}
+	if (ig_fight[c].state != IG_FIGHT_NONE) return;   /* a combat hook still finishing */
+	if (!IG_SlingOn()) return;
 	s = &ig_sling[c];
 	if (s->state != IG_SLING_JUMPED && IG_Hop(bs)) return;
 	/* a new map: the clock went back */
@@ -383,7 +404,8 @@ static void IG_SlingshotStep(bot_state_t *bs, bot_goal_t *goal, bot_moveresult_t
 	case IG_SLING_JUMPED:
 		/* near the top of the jump, from up there, pick the anchor */
 		if (FloatTime() - s->time < IG_JUMP_AIM) return;
-		if (!IG_RouteAhead(bs, goal, target) || !IG_FindAnchor(bs, target, s->anchor)) {
+		if (!IG_RouteAhead(bs, goal, target)) { IG_SlingEnd(s); return; }
+		if (!IG_FindAnchor(bs, target, s->anchor)) {
 			if (s->chain) BotAI_Print(PRT_MESSAGE, "ig: chain end %d noanchor\n", c);
 			IG_SlingEnd(s);
 			return;
@@ -393,12 +415,20 @@ static void IG_SlingshotStep(bot_state_t *bs, bot_goal_t *goal, bot_moveresult_t
 		/* fall through: aim this frame */
 
 	case IG_SLING_AIMING:
-		IG_ViewAt(bs, s->anchor);
+		/* the game fires along the view the LAST usercmd carried, so the hook
+		 * goes out only on the think after a flick -- and only if that flick
+		 * was the last view sent: a think in between spent in another node
+		 * (an enemy seen, the battle aim) sent its own view, and hooks fired
+		 * then flew level (game pitch -10..6 for 14 asked) */
+		if (!IG_FlickReady(bs, s->anchor)) {
+			if (FloatTime() - s->time > IG_AIM_TIME) IG_SlingEnd(s);
+			return;
+		}
 		if (FloatTime() - s->time > IG_AIM_TIME) {
 			IG_SlingEnd(s);
 			return;
 		}
-		if (!IG_Aimed(bs)) return;
+
 		/* the line to the anchor from where the bot is now, not where it was
 		 * when it chose it: a blocked or liquid line is a miss */
 		{
@@ -431,7 +461,24 @@ static void IG_SlingshotStep(bot_state_t *bs, bot_goal_t *goal, bot_moveresult_t
 		IG_GrappleTravelNote(c);        /* ours: the watchdog keeps off */
 		/* the flight; the pull counts from the latch */
 		if (!s->latched) {
-			if (IG_HookNear(s->anchor, IG_LATCH_RADIUS, hookpos) == 2 && IG_InFront(bs, hookpos)) {
+			int st = IG_HookNear(s->anchor, IG_LATCH_RADIUS, hookpos) == 2 && IG_InFront(bs, hookpos);
+			vec3_t to, vdir;
+
+			/* or the pull itself: once it catches, OSP sets the velocity to
+			 * the pull speed (975) toward the hook, which no run or jump
+			 * reaches. A shallow floor hook catches 100-300+ units off the
+			 * aimed spot, where the brain did not see it: 18% of slingshots
+			 * caught in the game were let go as misses. */
+			if (!st && speed > 800) {
+				VectorSubtract(s->anchor, bs->eye, to);
+				VectorCopy(bs->cur_ps.velocity, vdir);
+				to[2] = vdir[2] = 0;
+				if (VectorNormalize(to) > 1 && VectorNormalize(vdir) > 1 && DotProduct(to, vdir) > 0.8f) {
+					st = 1;
+					VectorCopy(s->anchor, hookpos);
+				}
+			}
+			if (st) {
 				VectorCopy(hookpos, s->anchor);
 				s->latched = FloatTime();
 				VectorCopy(bs->origin, s->latchpos);
@@ -477,10 +524,12 @@ static void IG_SlingshotStep(bot_state_t *bs, bot_goal_t *goal, bot_moveresult_t
 			return;
 		}
 		if (IG_OnGround(bs)) {
+			/* the two hops first (IG_Hop, above); a sling only after them */
+			if (ig_hops[c] < IG_HOP_MAX && FloatTime() < ig_hopuntil[c]) return;
 			VectorSubtract(target, bs->origin, d);
 			d[2] = 0;
 			VectorNormalize(d);
-			if (!IG_SafeCorridor(bs, d, 500)) {
+			if (!IG_SafeCorridor(bs, d, 350)) {
 				BotAI_Print(PRT_MESSAGE, "ig: chain end %d unsafe\n", c);
 				IG_SlingEnd(s);
 				return;
@@ -628,13 +677,12 @@ static void IG_HookMove(bot_state_t *bs, int infight)
 		f->time = FloatTime();
 		/* fall through */
 	case IG_FIGHT_AIMING:
-		IG_ViewAt(bs, f->anchor);
 		if (FloatTime() - f->time > 0.4f) {
 			f->state = IG_FIGHT_NONE;
 			f->cooldown = FloatTime() + IG_FIGHT_COOLDOWN;
 			return;
 		}
-		if (!IG_Aimed(bs)) return;
+		if (!IG_FlickReady(bs, f->anchor)) return;
 		if (!IG_CanFireHook(c)) return;      /* OSP's hook_wait, shared */
 		trap_EA_Command(c, LibVarGetString("cmd_grappleon"));
 		IG_NoteHookFire(c);
@@ -675,12 +723,6 @@ void IG_CombatHook(bot_state_t *bs)
 	IG_HookMove(bs, 1);
 }
 
-/* From the route nodes (via IG_Slingshot): a reposition called for after a
- * kill -- the fight node is left the moment the enemy dies. */
-static void IG_RepositionHook(bot_state_t *bs)
-{
-	IG_HookMove(bs, 0);
-}
 
 /* ------------------------------------------------------------------------
  * Out of the lava (IG-9). A bot in lava or slime hooks nearly straight up
@@ -751,9 +793,8 @@ int IG_LavaEscape(bot_state_t *bs)
 		BotAI_Print(PRT_MESSAGE, "ig: lava escape %d\n", c);
 		/* fall through */
 	case IG_LAVA_AIMING:
-		IG_ViewAt(bs, ig_lava[c].anchor);
 		if (FloatTime() - ig_lava[c].start > 3.0f) { ig_lava[c].state = IG_LAVA_NONE; return 1; }
-		if (!IG_AimedFor(bs, 15)) return 1;
+		if (!IG_FlickReady(bs, ig_lava[c].anchor)) return 1;
 		if (!IG_CanFireHook(c)) return 1;    /* OSP's hook_wait, shared */
 		trap_EA_Command(c, LibVarGetString("cmd_grappleon"));
 		IG_NoteHookFire(c);
