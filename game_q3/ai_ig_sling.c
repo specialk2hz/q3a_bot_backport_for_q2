@@ -504,6 +504,20 @@ static void IG_SlingshotStep(bot_state_t *bs, bot_goal_t *goal, bot_moveresult_t
 	case IG_SLING_HOOKED:
 		IG_ViewAt(bs, s->anchor);
 		IG_GrappleTravelNote(c);        /* ours: the watchdog keeps off */
+		/* a hop off the floor while pulled (IG-17): the floor anchor's pull
+		 * drags the body into the floor, and there ground friction takes ~60%
+		 * of OSP's 975 u/s every frame (the bots were on the floor 41% of the
+		 * pull, Billy 20%). A jump that frame clears the ground before the
+		 * friction, and the pull goes on at full speed. */
+		if (s->latched && IG_OnGround(bs) && trap_Cvar_VariableIntegerValue("ig_pullhop")) {
+			vec3_t vd;
+
+			/* only where the floor ahead is safe: a hop carries on past the
+			 * pull (q2rdm11 lava deaths 0.24 -> 0.41/min without this) */
+			VectorCopy(bs->cur_ps.velocity, vd);
+			vd[2] = 0;
+			if (VectorNormalize(vd) > 1 && IG_SafeCorridor(bs, vd, 350)) EA_Jump(c);
+		}
 		/* the flight; the pull counts from the latch */
 		if (!s->latched) {
 			int st = IG_HookNear(s->anchor, IG_LATCH_RADIUS, hookpos) == 2 && IG_InFront(bs, hookpos);
