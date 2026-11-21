@@ -42,6 +42,7 @@ Foundation, Inc., 51 Franklin St, Fifth Floor, Boston, MA  02110-1301  USA
 #include "ai_cmd.h"
 #include "ai_dmnet.h"
 #include "ai_team.h"
+#include "ai_ig.h" /* IG: */
 //
 #include "chars.h"				//characteristics
 #include "inv.h"				//indexes into the inventory
@@ -2879,6 +2880,7 @@ int BotFindEnemy(bot_state_t *bs, int curenemy) {
 	healthdecrease = bs->lasthealth > bs->inventory[INVENTORY_HEALTH];
 	//remember the current health value
 	bs->lasthealth = bs->inventory[INVENTORY_HEALTH];
+	{ int igr = IG_RevengeFindEnemy(bs, curenemy); if (igr >= 0) return igr; } /* IG: the nemesis first (IG-8) */
 	//
 	if (curenemy >= 0) {
 		BotEntityInfo(curenemy, &curenemyinfo);
@@ -4794,6 +4796,7 @@ void BotCheckEvents(bot_state_t *bs, entityState_t *state) {
 				else bs->botsuicide = false;
 				//
 				bs->num_deaths++;
+				IG_RevengeDeath(bs, attacker); /* IG: IG-8 */
 			}
 			//else if this client was killed by the bot
 			else if (attacker == bs->client) {
@@ -4802,6 +4805,7 @@ void BotCheckEvents(bot_state_t *bs, entityState_t *state) {
 				bs->killedenemy_time = FloatTime();
 				//
 				bs->num_kills++;
+				IG_RevengeKill(bs, target); /* IG: IG-8 */
 			}
 			else if (attacker == bs->enemy && target == attacker) {
 				bs->enemysuicide = true;
@@ -5238,6 +5242,7 @@ void BotDeathmatchAI(bot_state_t *bs, float thinktime) {
 		BotUpdateInventory(bs);
 		//check out the snapshot
 		BotCheckSnapshot(bs);
+		IG_RoamThink(bs); /* IG: what the bot saw and heard (IG-7) */
 		//check for air
 		BotCheckAir(bs);
 	}
