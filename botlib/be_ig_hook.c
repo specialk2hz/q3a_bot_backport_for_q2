@@ -372,6 +372,99 @@ int IG_CanFireHook(int client)
 	return AAS_Time() - ig_lastfire[client] >= IG_HOOK_WAIT;
 }
 
+/* The map's high ground, for the roam goal (game_q3/ai_ig_roam.c, IG-7):
+ * standable areas whose floor is in the top 40% of the map's floor heights
+ * (5th to 95th percentile), highest first, at least IG_HG_SPREAD apart, at
+ * most IG_HG_MAX. Worked out once per map, on first use. */
+#define IG_HG_MAX     16
+#define IG_HG_SPREAD  400
+#define IG_HG_FRAC    0.6f
+static int    ig_hgcount = -1;      /* -1: not worked out for this map */
+static int    ig_hgarea[IG_HG_MAX];
+static vec3_t ig_hgpoint[IG_HG_MAX];
+
+static int IG_FloatCmp(const void *a, const void *b)
+{
+	float d = *(const float *)a - *(const float *)b;
+	return d < 0 ? -1 : d > 0;
+}
+
+static void IG_FindHighGround(void)
+{
+	int i, j, n = 0, *cand;
+	float *floors, *sorted, zlo, zhi, cut;
+	vec3_t d;
+	aas_area_t *a;
+	aas_areasettings_t *st;
+
+	ig_hgcount = 0;
+	if (aasworld.numareas < 2) return;
+	floors = calloc(aasworld.numareas, sizeof(float));
+	sorted = calloc(aasworld.numareas, sizeof(float));
+	cand = calloc(aasworld.numareas, sizeof(int));
+	if (!floors || !sorted || !cand) { free(floors); free(sorted); free(cand); return; }
+	for (i = 1; i < aasworld.numareas; i++)
+	{
+		a = &aasworld.areas[i];
+		st = &aasworld.areasettings[i];
+		if (!(st->areaflags & AREA_GROUNDED)) continue;
+		if (!(st->presencetype & PRESENCE_NORMAL)) continue;
+		if (st->contents & (AREACONTENTS_LAVA | AREACONTENTS_SLIME | AREACONTENTS_WATER |
+							AREACONTENTS_JUMPPAD | AREACONTENTS_TELEPORTER)) continue;
+		if (st->numreachableareas <= 0) continue;
+		if (a->maxs[0] - a->mins[0] < 32 || a->maxs[1] - a->mins[1] < 32) continue;
+		floors[i] = a->mins[2];
+		sorted[n] = a->mins[2];
+		cand[n++] = i;
+	}
+	if (n < 8) { free(floors); free(sorted); free(cand); return; }
+	qsort(sorted, n, sizeof(float), IG_FloatCmp);
+	zlo = sorted[n / 20];
+	zhi = sorted[n - 1 - n / 20];
+	cut = zlo + IG_HG_FRAC * (zhi - zlo);
+	/* highest first: a selection by height over the candidates */
+	for (;;)
+	{
+		int best = -1;
+
+		for (i = 0; i < n; i++)
+		{
+			if (cand[i] <= 0 || floors[cand[i]] < cut) continue;
+			if (best < 0 || floors[cand[i]] > floors[cand[best]]) best = i;
+		}
+		if (best < 0 || ig_hgcount >= IG_HG_MAX) break;
+		a = &aasworld.areas[cand[best]];
+		for (j = 0; j < ig_hgcount; j++)
+		{
+			VectorSubtract(ig_hgpoint[j], a->center, d);
+			if (VectorLength(d) < IG_HG_SPREAD) break;
+		}
+		if (j == ig_hgcount)
+		{
+			ig_hgarea[ig_hgcount] = cand[best];
+			VectorCopy(a->center, ig_hgpoint[ig_hgcount]);
+			ig_hgpoint[ig_hgcount][2] = a->mins[2] + 24;   /* where a player stands */
+			ig_hgcount++;
+		}
+		cand[best] = -cand[best];
+	}
+	free(floors); free(sorted); free(cand);
+	botimport.Print(PRT_MESSAGE, "ig: %d high ground points (floor above %.0f)\n", ig_hgcount, cut);
+}
+
+int IG_HighGround(int max, int *areas, vec3_t *points)
+{
+	int i;
+
+	if (ig_hgcount < 0) IG_FindHighGround();
+	for (i = 0; i < ig_hgcount && i < max; i++)
+	{
+		areas[i] = ig_hgarea[i];
+		VectorCopy(ig_hgpoint[i], points[i]);
+	}
+	return i;
+}
+
 /* Called once the AAS file is loaded, before the routing is initialised. */
 void IG_AdjustGrappleCosts(void)
 {
@@ -380,6 +473,7 @@ void IG_AdjustGrappleCosts(void)
 	vec3_t d;
 	aas_reachability_t *r;
 
+	ig_hgcount = -1;    /* a new map: its high ground is worked out on first use */
 	free(ig_blocked);   /* libc, not the botlib's pools: it outlives nothing */
 	ig_blocked = NULL;
 	ig_blockedsize = 0;

@@ -82,6 +82,49 @@ typedef struct {
 
 static ig_sling_t ig_sling[MAX_CLIENTS];
 
+/* Keep the momentum (Billy: jump before the grapple, and keep jumping to keep
+ * the speed). Quake II applies ground friction only to a player on the
+ * ground, so a jump on the landing frame keeps the speed a hook gave. For
+ * IG_HOP_TIME after a let-go, a bot that lands still faster than
+ * IG_HOP_SPEED, with safe floor ahead the way it is moving, jumps at once --
+ * up to IG_HOP_MAX times. */
+#define IG_HOP_TIME   1.5f
+#define IG_HOP_SPEED  350
+#define IG_HOP_MAX    3
+static float ig_hopuntil[MAX_CLIENTS];
+static int   ig_hops[MAX_CLIENTS];
+
+static void IG_HopStart(int c)
+{
+	if (c < 0 || c >= MAX_CLIENTS) return;
+	ig_hopuntil[c] = FloatTime() + IG_HOP_TIME;
+	ig_hops[c] = 0;
+}
+
+static int IG_SafeCorridor(bot_state_t *bs, const vec3_t flat, float length);
+static int IG_OnGround(bot_state_t *bs);
+
+/* 1 if it hopped this think */
+static int IG_Hop(bot_state_t *bs)
+{
+	int c = bs->client;
+	vec3_t v;
+	float speed;
+
+	if (c < 0 || c >= MAX_CLIENTS) return 0;
+	if (ig_hopuntil[c] > FloatTime() + IG_HOP_TIME + 1) ig_hopuntil[c] = 0;     /* a new map */
+	if (FloatTime() > ig_hopuntil[c] || ig_hops[c] >= IG_HOP_MAX || !IG_OnGround(bs)) return 0;
+	VectorCopy(bs->cur_ps.velocity, v);
+	v[2] = 0;
+	speed = VectorNormalize(v);
+	if (speed < IG_HOP_SPEED || !IG_SafeCorridor(bs, v, 400)) return 0;
+	EA_Jump(c);
+	ig_hops[c]++;
+	ig_hopuntil[c] = FloatTime() + IG_HOP_TIME;   /* each hop extends it */
+	BotAI_Print(PRT_MESSAGE, "ig: hop %d speed %.0f\n", c, speed);
+	return 1;
+}
+
 /* the combat hook's state (IG-10), here because the slingshot checks it */
 #define IG_FIGHT_COOLDOWN 2.5f
 #define IG_FIGHT_PULL     0.25f
@@ -308,6 +351,7 @@ void IG_Slingshot(bot_state_t *bs, bot_goal_t *goal, bot_moveresult_t *moveresul
 	if (c >= 0 && c < MAX_CLIENTS && ig_fight[c].state != IG_FIGHT_NONE) return;   /* a reposition is on */
 	if (c < 0 || c >= MAX_CLIENTS || !IG_SlingOn()) return;
 	s = &ig_sling[c];
+	if (s->state != IG_SLING_JUMPED && IG_Hop(bs)) return;
 	/* a new map: the clock went back */
 	if (s->time > FloatTime() + 1 || s->cooldown > FloatTime() + IG_COOLDOWN + 5) memset(s, 0, sizeof(*s));
 	speed = VectorLength(bs->cur_ps.velocity);
@@ -414,6 +458,7 @@ void IG_Slingshot(bot_state_t *bs, bot_goal_t *goal, bot_moveresult_t *moveresul
 				BotAI_Print(PRT_MESSAGE, "ig: slingshot release %d speed %.0f after %.0f why %s pulled %.2f hook %d off %.0f\n", c, speed, dist,
 							why, s->latched ? FloatTime() - s->latched : 0, st, st ? VectorLength(d) : -1);
 			}
+			if (s->latched) IG_HopStart(c);
 			/* chain, or let it end */
 			if (s->latched && random() < IG_CHAIN_CHANCE) {
 				s->state = IG_SLING_AFTER;
@@ -617,6 +662,7 @@ static void IG_HookMove(bot_state_t *bs, int infight)
 			return;     /* still riding it; the AI aims at the enemy meanwhile */
 		trap_EA_Command(c, LibVarGetString("cmd_grappleoff"));
 		BotAI_Print(PRT_MESSAGE, "ig: fighthook release %d latched %d speed %.0f\n", c, f->latched > 0, speed);
+		if (f->latched) IG_HopStart(c);
 		f->state = IG_FIGHT_NONE;
 		f->cooldown = FloatTime() + IG_FIGHT_COOLDOWN;
 		return;

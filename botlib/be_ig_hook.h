@@ -10,6 +10,7 @@ int IG_HookDetect(void);
 int IG_IsHookEntity(int solid, int renderfx, int modelindex, char **names, int count);
 int IG_GrappleState(const vec3_t origin, const vec3_t viewoffset, const vec3_t anchor);
 void IG_AdjustGrappleCosts(void);
+int IG_HighGround(int max, int *areas, vec3_t *points);
 int IG_HookNear(const vec3_t point, float radius, vec3_t hookpos);
 void IG_GrappleTravelNote(int client);
 void IG_NoteHookFire(int client);
