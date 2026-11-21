@@ -353,6 +353,25 @@ int IG_HookNear(const vec3_t point, float radius, vec3_t hookpos)
 	return found;
 }
 
+/* One clock for every hook a bot fires -- route hooks, slingshots, combat
+ * hooks, the lava escape: OSP refuses a hook within hook_wait (0.5 s) of the
+ * previous FIRE (OSP_hookon_cmd), and the techniques, each timing itself,
+ * spent attempts on each other's wait. */
+#define IG_HOOK_WAIT 0.55f
+static float ig_lastfire[MAX_CLIENTS];
+
+void IG_NoteHookFire(int client)
+{
+	if (client >= 0 && client < MAX_CLIENTS) ig_lastfire[client] = AAS_Time();
+}
+
+int IG_CanFireHook(int client)
+{
+	if (client < 0 || client >= MAX_CLIENTS) return 0;
+	if (ig_lastfire[client] > AAS_Time()) ig_lastfire[client] = 0;      /* a new map */
+	return AAS_Time() - ig_lastfire[client] >= IG_HOOK_WAIT;
+}
+
 /* Called once the AAS file is loaded, before the routing is initialised. */
 void IG_AdjustGrappleCosts(void)
 {

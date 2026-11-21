@@ -41,6 +41,8 @@ of the License, or (at your option) any later version.
 
 /* botlib/be_ig_hook.c */
 void IG_GrappleTravelNote(int client);
+void IG_NoteHookFire(int client);
+int  IG_CanFireHook(int client);
 int  IG_HookNear(const vec3_t point, float radius, vec3_t hookpos);
 void EA_Jump(int client);
 
@@ -53,17 +55,17 @@ void EA_Jump(int client);
 #define IG_AIM_TOL       4      /* degrees: looser was sloppy -- misses that drop the bot */
 #define IG_FLY_MAX       0.4f   /* seconds for the hook to latch (a short throw) */
 #define IG_RELEASE_FRAC  0.6f   /* let go this far along the pull ... */
-#define IG_RELEASE_SPEED 850    /* ... or this fast and past a quarter of it */
+#define IG_RELEASE_SPEED 900    /* ... or this fast, after a moment's pull */
 #define IG_HOOK_MAX      0.35f  /* seconds pulled at most, from the latch */
 #define IG_STALL_SPEED   150    /* pulled but this slow: the body is caught */
-#define IG_LATCH_RADIUS  450    /* how far from the aimed anchor the hook may latch: a
+#define IG_LATCH_RADIUS  650    /* how far from the aimed anchor the hook may latch: a
                                   * floor hook at a shallow angle lands far along the
                                   * floor for a few degrees of aim; it is the bot's
                                   * hook if it is in front of it (IG_InFront) */
 #define IG_REHOOK        0.5f   /* OSP's hook_wait: the soonest it can hook again */
-#define IG_CHAIN_WINDOW  2.0f   /* in the air this long after a let-go, it may chain */
-#define IG_CHAIN_CHANCE  0.85f  /* how often it does (Billy: 59% within 1.5 s, at 18 hooks a minute) */
-#define IG_COOLDOWN      0.6f   /* after a sequence ends, before the next jump */
+#define IG_CHAIN_WINDOW  2.5f   /* in the air this long after a let-go, it may chain */
+#define IG_CHAIN_CHANCE  0.95f  /* how often it does (Billy: 59% within 1.5 s, at 18 hooks a minute) */
+#define IG_COOLDOWN      0.4f   /* after a sequence ends, before the next jump */
 
 enum { IG_SLING_IDLE, IG_SLING_JUMPED, IG_SLING_AIMING, IG_SLING_HOOKED, IG_SLING_AFTER };
 
@@ -173,11 +175,11 @@ static int IG_AnchorTraceSky(bot_state_t *bs, vec3_t end, bsp_trace_t *tr, int a
 	return 1;
 }
 
-/* Movement hooks keep off the sky for now; the lava escape takes it when
- * the server allows it (hook_sky, pushed as ig_hooksky). */
+/* The sky is an anchor when the server allows hooking it (hook_sky, pushed
+ * as ig_hooksky; on in instagib): open areas have no other. */
 static int IG_AnchorTrace(bot_state_t *bs, vec3_t end, bsp_trace_t *tr)
 {
-	return IG_AnchorTraceSky(bs, end, tr, 0);
+	return IG_AnchorTraceSky(bs, end, tr, trap_Cvar_VariableIntegerValue("ig_hooksky"));
 }
 
 /* Floor under p, within 700 units, and not lava or slime. */
@@ -236,13 +238,26 @@ static int IG_FindAnchor(bot_state_t *bs, const vec3_t target, vec3_t anchor)
 	float d;
 	int i;
 
+	/* straight along the route first, then up to 30 degrees either side: a
+	 * person glances for the nearest wall to take (chains ended for want of
+	 * an anchor dead ahead: 654 of 2 100 in a test) */
+	static const float yaws[] = { 0, 15, -15, 30, -30 };
+	float routeyaw;
+	int k;
+
 	VectorSubtract(target, bs->eye, flat);
 	flat[2] = 0;
 	if (VectorNormalize(flat) < IG_ANCHOR_MIN) return 0;
 	vectoangles(flat, angles);
-	for (i = 0; i < (int)(sizeof(pitches) / sizeof(pitches[0])); i++) {
+	routeyaw = angles[YAW];
+	for (k = 0; k < 25; k++) {
+		i = k % 5;
+		angles[YAW] = routeyaw + yaws[k / 5];
 		angles[PITCH] = -pitches[i];
 		AngleVectors(angles, dir, NULL, NULL);
+		AngleVectors(angles, flat, NULL, NULL);
+		flat[2] = 0;
+		VectorNormalize(flat);
 		VectorMA(bs->eye, IG_ANCHOR_MAX, dir, end);
 		if (!IG_AnchorTrace(bs, end, &tr)) continue;
 		d = tr.fraction * IG_ANCHOR_MAX;
@@ -325,6 +340,7 @@ void IG_Slingshot(bot_state_t *bs, bot_goal_t *goal, bot_moveresult_t *moveresul
 		/* near the top of the jump, from up there, pick the anchor */
 		if (FloatTime() - s->time < IG_JUMP_AIM) return;
 		if (!IG_RouteAhead(bs, goal, target) || !IG_FindAnchor(bs, target, s->anchor)) {
+			if (s->chain) BotAI_Print(PRT_MESSAGE, "ig: chain end %d noanchor\n", c);
 			IG_SlingEnd(s);
 			return;
 		}
@@ -352,7 +368,9 @@ void IG_Slingshot(bot_state_t *bs, bot_goal_t *goal, bot_moveresult_t *moveresul
 			VectorSubtract(tr.endpos, s->anchor, d);
 			if (VectorLength(d) > 48) { IG_SlingEnd(s); return; }
 		}
+		if (!IG_CanFireHook(c)) return;      /* OSP's hook_wait, shared */
 		trap_EA_Command(c, LibVarGetString("cmd_grappleon"));
+		IG_NoteHookFire(c);
 		IG_GrappleTravelNote(c);
 		VectorSubtract(s->anchor, bs->eye, d);
 		BotAI_Print(PRT_MESSAGE, "ig: slingshot %d length %.0f chain %d air %d\n", c, VectorLength(d), s->chain,
@@ -383,7 +401,7 @@ void IG_Slingshot(bot_state_t *bs, bot_goal_t *goal, bot_moveresult_t *moveresul
 		{
 			const char *why = !s->latched ? "nolatch" :
 				dist > IG_RELEASE_FRAC * s->remain ? "far" :
-				(speed > IG_RELEASE_SPEED && dist > s->remain / 4) ? "fast" :
+				(speed > IG_RELEASE_SPEED && FloatTime() - s->latched >= 0.08f) ? "fast" :   /* at full speed, keep it */
 				FloatTime() - s->latched > IG_HOOK_MAX ? "time" :
 				(FloatTime() - s->latched > 0.1f && speed < IG_STALL_SPEED) ? "stall" :
 				!IG_HookNear(s->anchor, 48, hookpos) ? "lost" : NULL;
@@ -409,6 +427,7 @@ void IG_Slingshot(bot_state_t *bs, bot_goal_t *goal, bot_moveresult_t *moveresul
 		/* the next hook of the chain: OSP's wait, then from the air, or a new jump from the ground */
 		if (FloatTime() - s->time < IG_REHOOK) return;
 		if (FloatTime() - s->time > IG_CHAIN_WINDOW || !IG_RouteAhead(bs, goal, target)) {
+			BotAI_Print(PRT_MESSAGE, "ig: chain end %d %s\n", c, FloatTime() - s->time > IG_CHAIN_WINDOW ? "window" : "route");
 			IG_SlingEnd(s);
 			return;
 		}
@@ -417,9 +436,11 @@ void IG_Slingshot(bot_state_t *bs, bot_goal_t *goal, bot_moveresult_t *moveresul
 			d[2] = 0;
 			VectorNormalize(d);
 			if (!IG_SafeCorridor(bs, d, 500)) {
+				BotAI_Print(PRT_MESSAGE, "ig: chain end %d unsafe\n", c);
 				IG_SlingEnd(s);
 				return;
 			}
+			BotAI_Print(PRT_MESSAGE, "ig: chain jump %d\n", c);
 			EA_Jump(c);
 			s->state = IG_SLING_JUMPED;
 			s->time = FloatTime();
@@ -569,7 +590,9 @@ static void IG_HookMove(bot_state_t *bs, int infight)
 			return;
 		}
 		if (!IG_Aimed(bs)) return;
+		if (!IG_CanFireHook(c)) return;      /* OSP's hook_wait, shared */
 		trap_EA_Command(c, LibVarGetString("cmd_grappleon"));
+		IG_NoteHookFire(c);
 		IG_GrappleTravelNote(c);
 		BotAI_Print(PRT_MESSAGE, "ig: fighthook %d\n", c);
 		f->state = IG_FIGHT_HOOKED;
@@ -685,8 +708,9 @@ int IG_LavaEscape(bot_state_t *bs)
 		IG_ViewAt(bs, ig_lava[c].anchor);
 		if (FloatTime() - ig_lava[c].start > 3.0f) { ig_lava[c].state = IG_LAVA_NONE; return 1; }
 		if (!IG_AimedFor(bs, 15)) return 1;
-		if (FloatTime() - ig_lava[c].fired < IG_REHOOK) return 1;     /* OSP's hook_wait */
+		if (!IG_CanFireHook(c)) return 1;    /* OSP's hook_wait, shared */
 		trap_EA_Command(c, LibVarGetString("cmd_grappleon"));
+		IG_NoteHookFire(c);
 		IG_GrappleTravelNote(c);
 		ig_lava[c].state = IG_LAVA_HOOKED;
 		ig_lava[c].time = ig_lava[c].fired = FloatTime();

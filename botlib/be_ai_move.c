@@ -3099,6 +3099,7 @@ bot_moveresult_t BotTravel_Grapple(bot_movestate_t *ms, aas_reachability_t *reac
 			if (offhandgrapple->value)
 			{
 				EA_Command(ms->client, cmd_grappleon->string);
+				IG_NoteHookFire(ms->client); /* IG: one hook clock (IG-9) */
 			} //end if
 			else
 			{

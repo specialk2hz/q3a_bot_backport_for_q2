@@ -12,6 +12,8 @@ int IG_GrappleState(const vec3_t origin, const vec3_t viewoffset, const vec3_t a
 void IG_AdjustGrappleCosts(void);
 int IG_HookNear(const vec3_t point, float radius, vec3_t hookpos);
 void IG_GrappleTravelNote(int client);
+void IG_NoteHookFire(int client);
+int IG_CanFireHook(int client);
 float IG_GrappleStartDist(float dist);
 void IG_GrappleBlocked(int reachnum);
 void IG_GrappleAim(const vec3_t eye, const vec3_t anchor, float lift, int passent, vec3_t viewdir);
