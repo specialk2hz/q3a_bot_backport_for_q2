@@ -50,7 +50,7 @@ void EA_Jump(int client);
 #define IG_ANCHOR_MAX    450
 #define IG_JUMP_AIM      0.15f  /* seconds into the jump to pick the anchor */
 #define IG_AIM_TIME      0.5f   /* seconds to get aimed and fire */
-#define IG_AIM_TOL       8      /* degrees */
+#define IG_AIM_TOL       4      /* degrees: looser was sloppy -- misses that drop the bot */
 #define IG_FLY_MAX       0.4f   /* seconds for the hook to latch (a short throw) */
 #define IG_RELEASE_FRAC  0.6f   /* let go this far along the pull ... */
 #define IG_RELEASE_SPEED 850    /* ... or this fast and past a quarter of it */
@@ -94,16 +94,89 @@ static void IG_ViewAt(bot_state_t *bs, const vec3_t p)
 	bs->flags |= BFL_IDEALVIEWSET;
 }
 
+static int IG_AimedNow(bot_state_t *bs, float tol)
+{
+	return fabs(AngleDifference(bs->viewangles[0], bs->ideal_viewangles[0])) < tol &&
+		   fabs(AngleDifference(bs->viewangles[1], bs->ideal_viewangles[1])) < tol;
+}
+
+/* Aimed, and already aimed the think before. A client command (the hook)
+ * runs at once, with the view the GAME has -- the last usercmd's --, while
+ * the brain's view is this think's: firing the think it first got aimed
+ * sent the hook along last frame's view, past the anchor (63% of the
+ * slingshots that never latched). */
+static float ig_aimedsince[MAX_CLIENTS];
+static int IG_AimedFor(bot_state_t *bs, float tol)
+{
+	int c = bs->client;
+
+	if (c < 0 || c >= MAX_CLIENTS) return 0;
+	if (!IG_AimedNow(bs, tol)) {
+		ig_aimedsince[c] = 0;
+		return 0;
+	}
+	if (ig_aimedsince[c] <= 0 || ig_aimedsince[c] > FloatTime()) {
+		ig_aimedsince[c] = FloatTime();
+		return 0;
+	}
+	return FloatTime() > ig_aimedsince[c];
+}
+
 static int IG_Aimed(bot_state_t *bs)
 {
-	return fabs(AngleDifference(bs->viewangles[0], bs->ideal_viewangles[0])) < IG_AIM_TOL &&
-		   fabs(AngleDifference(bs->viewangles[1], bs->ideal_viewangles[1])) < IG_AIM_TOL;
+	return IG_AimedFor(bs, IG_AIM_TOL);
 }
 
 static int IG_OnGround(bot_state_t *bs)
 {
 	return bs->cur_ps.groundEntityNum != ENTITYNUM_NONE;
 }
+
+#define IG_LIQUIDS (CONTENTS_LAVA | CONTENTS_SLIME)
+
+/* A trace to an anchor that also sees lava and slime: MASK_SOLID passes
+ * through a pool's surface and finds the floor under it, a "solid" anchor
+ * that pulls the bot in. False if it hit a liquid or the sky. */
+static int IG_AnchorTrace(bot_state_t *bs, vec3_t end, bsp_trace_t *tr)
+{
+	BotAI_Trace(tr, bs->eye, NULL, NULL, end, bs->entitynum, MASK_SOLID | IG_LIQUIDS);
+	if (tr->fraction >= 1 || tr->startsolid) return 0;
+	if (tr->contents & IG_LIQUIDS) return 0;
+	if (tr->surface.flags & SURF_SKY) return 0;     /* the bots do not hook the sky (yet) */
+	return 1;
+}
+
+/* Floor under p, within 700 units, and not lava or slime. */
+static int IG_SafeGround(bot_state_t *bs, const vec3_t p)
+{
+	vec3_t down;
+	bsp_trace_t tr;
+
+	VectorCopy(p, down);
+	down[2] -= 700;
+	BotAI_Trace(&tr, (vec_t *)p, NULL, NULL, down, bs->entitynum, MASK_SOLID | IG_LIQUIDS);
+	return tr.fraction < 1 && !(tr.contents & IG_LIQUIDS);
+}
+
+/* Safe floor every IG_CORRIDOR_STEP along `flat` (horizontal, unit) from
+ * the bot out to `length`: where a hooked bot flies. Released at ~975 u/s it
+ * travels up to a second more, 800 units past the let-go -- checking only
+ * the let-go and the anchor put the bots in q2rdm11's lava (105 deaths in
+ * 10 matches traced back to slingshots and combat hooks). */
+#define IG_CORRIDOR_STEP 96
+static int IG_SafeCorridor(bot_state_t *bs, const vec3_t flat, float length)
+{
+	vec3_t p;
+	float t;
+
+	for (t = IG_CORRIDOR_STEP; t <= length; t += IG_CORRIDOR_STEP) {
+		VectorMA(bs->origin, t, flat, p);
+		if (!IG_SafeGround(bs, p)) return 0;
+	}
+	return 1;
+}
+
+int IG_LavaEscape(bot_state_t *bs);
 
 /* Where the route goes: a point IG_LOOKAHEAD along it, if it runs far
  * enough. */
@@ -122,7 +195,7 @@ static int IG_FindAnchor(bot_state_t *bs, const vec3_t target, vec3_t anchor)
 {
 	/* above and below eye level, Billy's middle first */
 	static const float pitches[] = { -12, -4, -18, 4, 12 };
-	vec3_t dir, flat, end, mid, down, angles;
+	vec3_t dir, flat, end, mid, angles;
 	vec3_t mins = {-16, -16, -24}, maxs = {16, 16, 32};
 	bsp_trace_t tr;
 	float d;
@@ -136,21 +209,17 @@ static int IG_FindAnchor(bot_state_t *bs, const vec3_t target, vec3_t anchor)
 		angles[PITCH] = -pitches[i];
 		AngleVectors(angles, dir, NULL, NULL);
 		VectorMA(bs->eye, IG_ANCHOR_MAX, dir, end);
-		BotAI_Trace(&tr, bs->eye, NULL, NULL, end, bs->entitynum, MASK_SOLID);
-		if (tr.fraction >= 1 || tr.startsolid) continue;
-		if (tr.surface.flags & SURF_SKY) continue;     /* the bots do not hook the sky (yet) */
+		if (!IG_AnchorTrace(bs, end, &tr)) continue;
 		d = tr.fraction * IG_ANCHOR_MAX;
 		if (d < IG_ANCHOR_MIN) continue;
 		/* the body's path to the release point must be clear */
 		VectorMA(bs->origin, IG_RELEASE_FRAC * d, dir, mid);
-		BotAI_Trace(&tr, bs->origin, mins, maxs, mid, bs->entitynum, MASK_SOLID);
+		BotAI_Trace(&tr, bs->origin, mins, maxs, mid, bs->entitynum, MASK_SOLID | IG_LIQUIDS);
 		if (tr.fraction < 1) continue;
-		/* and there must be floor (not a pit, not lava) under where it flies on */
-		VectorMA(bs->origin, d, flat, mid);
-		VectorCopy(mid, down);
-		down[2] -= 700;
-		BotAI_Trace(&tr, mid, NULL, NULL, down, bs->entitynum, MASK_SOLID | CONTENTS_LAVA | CONTENTS_SLIME);
-		if (tr.fraction >= 1 || (tr.contents & (CONTENTS_LAVA | CONTENTS_SLIME))) continue;
+		/* safe floor (not a pit, not lava) under the let-go, the anchor, and
+		 * beyond, where the speed it keeps carries it */
+		if (!IG_SafeGround(bs, mid)) continue;
+		if (!IG_SafeCorridor(bs, flat, d + 300)) continue;
 		VectorMA(bs->eye, d, dir, anchor);
 		return 1;
 	}
@@ -184,6 +253,7 @@ void IG_Slingshot(bot_state_t *bs, bot_goal_t *goal, bot_moveresult_t *moveresul
 	float speed, dist;
 	int c = bs->client;
 
+	if (IG_LavaEscape(bs)) return;
 	if (c < 0 || c >= MAX_CLIENTS || !IG_SlingOn()) return;
 	s = &ig_sling[c];
 	/* a new map: the clock went back */
@@ -201,6 +271,13 @@ void IG_Slingshot(bot_state_t *bs, bot_goal_t *goal, bot_moveresult_t *moveresul
 		d[2] = 0;
 		VectorNormalize(d);
 		if (DotProduct(d, bs->cur_ps.velocity) < 0.6f * speed) return;
+		/* the jump comes before the anchor, so the way ahead is checked first:
+		 * a jump on a walkway beside lava was a jump into it (q2rdm11: lava
+		 * deaths 58 -> 157 when the slingshot became jump-first) */
+		if (!IG_SafeCorridor(bs, d, 500)) {
+			s->cooldown = FloatTime() + 0.5f;
+			return;
+		}
 		EA_Jump(c);
 		s->state = IG_SLING_JUMPED;
 		s->time = FloatTime();
@@ -225,6 +302,19 @@ void IG_Slingshot(bot_state_t *bs, bot_goal_t *goal, bot_moveresult_t *moveresul
 			return;
 		}
 		if (!IG_Aimed(bs)) return;
+		/* the line to the anchor from where the bot is now, not where it was
+		 * when it chose it: a blocked or liquid line is a miss */
+		{
+			bsp_trace_t tr;
+			vec3_t far;
+
+			VectorSubtract(s->anchor, bs->eye, d);
+			VectorNormalize(d);
+			VectorMA(s->anchor, 24, d, far);
+			if (!IG_AnchorTrace(bs, far, &tr)) { IG_SlingEnd(s); return; }
+			VectorSubtract(tr.endpos, s->anchor, d);
+			if (VectorLength(d) > 48) { IG_SlingEnd(s); return; }
+		}
 		trap_EA_Command(c, LibVarGetString("cmd_grappleon"));
 		IG_GrappleTravelNote(c);
 		VectorSubtract(s->anchor, bs->eye, d);
@@ -286,6 +376,13 @@ void IG_Slingshot(bot_state_t *bs, bot_goal_t *goal, bot_moveresult_t *moveresul
 			return;
 		}
 		if (IG_OnGround(bs)) {
+			VectorSubtract(target, bs->origin, d);
+			d[2] = 0;
+			VectorNormalize(d);
+			if (!IG_SafeCorridor(bs, d, 500)) {
+				IG_SlingEnd(s);
+				return;
+			}
 			EA_Jump(c);
 			s->state = IG_SLING_JUMPED;
 			s->time = FloatTime();
@@ -335,7 +432,7 @@ static int IG_FightAnchor(bot_state_t *bs, vec3_t anchor)
 	/* sideways and up first: height for the angle, sideways to be missed */
 	static const float yaws[] = { 40, -40, 55, -55, 25, -25 };
 	static const float pitches[] = { 15, 5, 28 };
-	vec3_t dir, end, mid, down, angles;
+	vec3_t dir, end, mid, angles;
 	vec3_t mins = {-16, -16, -24}, maxs = {16, 16, 32};
 	bsp_trace_t tr;
 	float d, side = random() < 0.5f ? 1 : -1;
@@ -348,17 +445,21 @@ static int IG_FightAnchor(bot_state_t *bs, vec3_t anchor)
 			angles[PITCH] = -pitches[j];
 			AngleVectors(angles, dir, NULL, NULL);
 			VectorMA(bs->eye, IG_ANCHOR_MAX, dir, end);
-			BotAI_Trace(&tr, bs->eye, NULL, NULL, end, bs->entitynum, MASK_SOLID);
-			if (tr.fraction >= 1 || tr.startsolid || (tr.surface.flags & SURF_SKY)) continue;
+			if (!IG_AnchorTrace(bs, end, &tr)) continue;
 			d = tr.fraction * IG_ANCHOR_MAX;
 			if (d < IG_ANCHOR_MIN) continue;
 			VectorMA(bs->origin, 0.5f * d, dir, mid);
-			BotAI_Trace(&tr, bs->origin, mins, maxs, mid, bs->entitynum, MASK_SOLID);
+			BotAI_Trace(&tr, bs->origin, mins, maxs, mid, bs->entitynum, MASK_SOLID | IG_LIQUIDS);
 			if (tr.fraction < 1) continue;
-			VectorCopy(mid, down);
-			down[2] -= 700;
-			BotAI_Trace(&tr, mid, NULL, NULL, down, bs->entitynum, MASK_SOLID | CONTENTS_LAVA | CONTENTS_SLIME);
-			if (tr.fraction >= 1 || (tr.contents & (CONTENTS_LAVA | CONTENTS_SLIME))) continue;
+			if (!IG_SafeGround(bs, mid)) continue;
+			{
+				vec3_t flat;
+
+				VectorCopy(dir, flat);
+				flat[2] = 0;
+				VectorNormalize(flat);
+				if (!IG_SafeCorridor(bs, flat, d + 200)) continue;
+			}
 			VectorMA(bs->eye, d, dir, anchor);
 			return 1;
 		}
@@ -374,6 +475,7 @@ void IG_CombatHook(bot_state_t *bs)
 	float dist, speed;
 	int c = bs->client;
 
+	if (IG_LavaEscape(bs)) return;
 	if (c < 0 || c >= MAX_CLIENTS || !trap_Cvar_VariableIntegerValue("ig_fighthook") ||
 		!trap_Cvar_VariableIntegerValue("ig_hookdetect")) return;
 	f = &ig_fight[c];
@@ -395,7 +497,16 @@ void IG_CombatHook(bot_state_t *bs)
 			f->cooldown = FloatTime() + 0.5f;
 			return;
 		}
-		if (IG_OnGround(bs)) EA_Jump(c);
+		if (IG_OnGround(bs)) {
+			VectorSubtract(f->anchor, bs->origin, d);
+			d[2] = 0;
+			VectorNormalize(d);
+			if (!IG_SafeCorridor(bs, d, 400)) {
+				f->cooldown = FloatTime() + 0.5f;
+				return;
+			}
+			EA_Jump(c);
+		}
 		f->state = IG_FIGHT_AIMING;
 		f->time = FloatTime();
 		/* fall through */
@@ -436,4 +547,72 @@ void IG_CombatHook(bot_state_t *bs)
 		f->cooldown = FloatTime() + IG_FIGHT_COOLDOWN;
 		return;
 	}
+}
+
+/* ------------------------------------------------------------------------
+ * Out of the lava (IG-9). A bot in lava or slime looks for the nearest
+ * solid anchor up and out -- nearest its view first, steep first --, hooks
+ * on a looser aim than usual (the lava is the hurry), and holds until it is
+ * out with floor that is not lava under it, or 2.5 s. Overrides a slingshot
+ * or a combat hook. Needs the hook wiring (ig_hookdetect); called first by
+ * IG_Slingshot and IG_CombatHook, so from every node that moves the bot.
+ * ------------------------------------------------------------------------ */
+
+enum { IG_LAVA_NONE, IG_LAVA_AIMING, IG_LAVA_HOOKED };
+static struct { int state; float time; vec3_t anchor; } ig_lava[MAX_CLIENTS];
+
+int IG_LavaEscape(bot_state_t *bs)
+{
+	static const float yaws[] = { 0, 45, -45, 90, -90, 135, -135, 180 };
+	static const float pitches[] = { 55, 35, 75 };
+	int c = bs->client, i, j;
+	vec3_t dir, end, angles, below;
+	bsp_trace_t tr;
+
+	if (c < 0 || c >= MAX_CLIENTS || !trap_Cvar_VariableIntegerValue("ig_hookdetect")) return 0;
+	if (ig_lava[c].time > FloatTime() + 1) ig_lava[c].state = IG_LAVA_NONE;       /* a new map */
+	switch (ig_lava[c].state) {
+	case IG_LAVA_NONE:
+		if (!BotInLavaOrSlime(bs)) return 0;
+		for (i = 0; i < 8; i++) {
+			for (j = 0; j < 3; j++) {
+				VectorCopy(bs->viewangles, angles);
+				angles[YAW] += yaws[i];
+				angles[PITCH] = -pitches[j];
+				AngleVectors(angles, dir, NULL, NULL);
+				VectorMA(bs->eye, 1200, dir, end);
+				if (!IG_AnchorTrace(bs, end, &tr) || tr.fraction * 1200 < 64) continue;
+				VectorCopy(tr.endpos, ig_lava[c].anchor);
+				goto found;
+			}
+		}
+		return 0;       /* nothing to hook: the route's own way out */
+	found:
+		ig_sling[c].state = IG_SLING_IDLE;
+		ig_fight[c].state = IG_FIGHT_NONE;
+		ig_lava[c].state = IG_LAVA_AIMING;
+		ig_lava[c].time = FloatTime();
+		BotAI_Print(PRT_MESSAGE, "ig: lava escape %d\n", c);
+		/* fall through */
+	case IG_LAVA_AIMING:
+		IG_ViewAt(bs, ig_lava[c].anchor);
+		if (FloatTime() - ig_lava[c].time > 0.6f) { ig_lava[c].state = IG_LAVA_NONE; return 1; }
+		if (!IG_AimedFor(bs, 15)) return 1;
+		trap_EA_Command(c, LibVarGetString("cmd_grappleon"));
+		IG_GrappleTravelNote(c);
+		ig_lava[c].state = IG_LAVA_HOOKED;
+		ig_lava[c].time = FloatTime();
+		return 1;
+	case IG_LAVA_HOOKED:
+		IG_ViewAt(bs, ig_lava[c].anchor);
+		IG_GrappleTravelNote(c);
+		VectorCopy(bs->origin, below);
+		if ((!BotInLavaOrSlime(bs) && IG_SafeGround(bs, below)) || FloatTime() - ig_lava[c].time > 2.5f) {
+			trap_EA_Command(c, LibVarGetString("cmd_grappleoff"));
+			BotAI_Print(PRT_MESSAGE, "ig: lava escape release %d out %d\n", c, !BotInLavaOrSlime(bs));
+			ig_lava[c].state = IG_LAVA_NONE;
+		}
+		return 1;
+	}
+	return 0;
 }
