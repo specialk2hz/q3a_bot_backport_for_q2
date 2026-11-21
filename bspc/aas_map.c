@@ -702,6 +702,24 @@ void AAS_PositionBrush(entity_t *mapent, mapbrush_t *brush)
 		{
 			//set the jumppad contents
 			brush->contents = CONTENTS_JUMPPAD;
+			//IG: -q2pads. A Quake II trigger fires when the player's box
+			//touches it, so a pad brush may sit with its top at floor level or
+			//inside the floor; AAS areas only cover open space, and such a pad
+			//made no jump pad area ("trigger_push not in any jump pad area").
+			//Raise its upward faces 8 units into the open.
+			{
+				extern int ig_q2pads;
+				if (ig_q2pads)
+				{
+					for (i = 0; i < brush->numsides; i++)
+					{
+						s = &brush->original_sides[i];
+						if (mapplanes[s->planenum].normal[2] > 0.7)
+							s->planenum = FindFloatPlane(mapplanes[s->planenum].normal,
+														 mapplanes[s->planenum].dist + 8 * mapplanes[s->planenum].normal[2]);
+					} //end for
+				} //end if
+			}
 			//Log_Print("found trigger_push brush\n");
 		} //end if
 		//

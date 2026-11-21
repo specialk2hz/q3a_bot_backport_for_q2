@@ -44,6 +44,8 @@ Foundation, Inc., 51 Franklin St, Fifth Floor, Boston, MA  02110-1301  USA
 
 extern	int use_nodequeue;		//brushbsp.c
 extern	int calcgrapplereach;	//be_aas_reach.c
+int ig_q2aircontrol;		//IG: -q2aircontrol, used by be_aas_bspc.c
+int ig_q2pads;			//IG: -q2pads, used by aas_map.c
 
 float			subdivide_size = 240;
 char			source[1024];
@@ -640,6 +642,20 @@ int main (int argc, char **argv)
 			calcgrapplereach = true;
 			Log_Print("grapplereach = true\n");
 		} //end else if
+		else if (!stricmp(argv[i], "-q2aircontrol"))
+		{
+			//IG: Quake II steers in the air with an acceleration of 1 when
+			//pm_airaccelerate is 0 (PM_Accelerate(wishdir, wishspeed, 1));
+			//phys_airaccelerate 0 gave the route prediction no air control
+			ig_q2aircontrol = true;
+			Log_Print("q2aircontrol = true\n");
+		} //end else if
+		else if (!stricmp(argv[i], "-q2pads"))
+		{
+			//IG: jump pads sunk into the floor still make jump pad areas
+			ig_q2pads = true;
+			Log_Print("q2pads = true\n");
+		} //end else if
 		else if (!stricmp(argv[i], "-nobrushmerge"))
 		{
 			nobrushmerge = true;
@@ -974,6 +990,8 @@ int main (int argc, char **argv)
 			"   nocsg                                = disables brush chopping\n"
 			"   forcesidesvisible                    = force all sides to be visible\n"
 			"   grapplereach                         = calculate grapple reachabilities\n"
+			"   q2aircontrol                         = predict Quake II's air control (IG)\n"
+			"   q2pads                               = raise jump pads sunk into the floor (IG)\n"
 
 /*			"   glview     = output a GL view\n"
 			"   draw       = enables drawing\n"

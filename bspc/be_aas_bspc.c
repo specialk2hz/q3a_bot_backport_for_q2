@@ -519,7 +519,8 @@ void Q2_AAS_CalcReachAndClusters(void)
 	LibVarSet("phys_maxstep",           "18");
 	LibVarSet("phys_maxbarrier",        "50");
 	LibVarSet("phys_watergravity",      "100");
-	LibVarSet("phys_airaccelerate",     "0");
+	extern int ig_q2aircontrol;	/* IG: bspc.c, -q2aircontrol */
+	LibVarSet("phys_airaccelerate",     ig_q2aircontrol ? "1" : "0");
 	LibVarSet("phys_swimaccelerate",    "10");
 	/* Gladiator's jump start cost (its be_aas_reach.c: 600 + distance time;
 	 * Q3's rs_startjump is 300): fewer routes over the gaps the bots fall
