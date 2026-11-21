@@ -3340,6 +3340,7 @@ bot_moveresult_t BotFinishTravel_JumpPad(bot_movestate_t *ms, aas_reachability_t
 	vec3_t hordir;
 	bot_moveresult_t_cleared( result );
 
+	IG_NotePadFlight(ms->client, reach->end); /* IG: the pad hook (IG-13) */
 	if (!BotAirControl(ms->origin, ms->velocity, reach->end, hordir, &speed))
 	{
 		hordir[0] = reach->end[0] - ms->origin[0];

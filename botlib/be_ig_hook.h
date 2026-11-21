@@ -16,6 +16,8 @@ void IG_GrappleTravelNote(int client);
 void IG_NoteHookFire(int client);
 int IG_CanFireHook(int client);
 float IG_GrappleStartDist(float dist);
+void IG_NotePadFlight(int client, const vec3_t end);
+int IG_PadFlight(int client, vec3_t end);
 void IG_GrappleBlocked(int reachnum);
 void IG_GrappleAim(const vec3_t eye, const vec3_t anchor, float lift, int passent, vec3_t viewdir);
 void IG_GrappleWatchdog(int client);

@@ -507,3 +507,28 @@ void IG_AdjustGrappleCosts(void)
 	}
 	if (n || nodrop) botimport.Print(PRT_MESSAGE, "ig: %d grapple reachabilities at start cost %d, %d that climb less than %d taken out\n", n, (int) start, nodrop, IG_CLIMB);
 }
+
+/* The landing spot of the jump pad a bot is flying, noted each frame by
+ * BotFinishTravel_JumpPad (be_ai_move.c), for the pad hook
+ * (game_q3/ai_ig_sling.c): hook ahead to the landing instead of riding the arc. */
+static vec3_t ig_padend[MAX_CLIENTS];
+static float  ig_padseen[MAX_CLIENTS];
+
+void IG_NotePadFlight(int client, const vec3_t end)
+{
+	if (client < 0 || client >= MAX_CLIENTS) return;
+	VectorCopy(end, ig_padend[client]);
+	ig_padseen[client] = AAS_Time();
+}
+
+/* true while the bot is in a pad's flight (noted within the last 0.25 s) */
+int IG_PadFlight(int client, vec3_t end)
+{
+	float t;
+
+	if (client < 0 || client >= MAX_CLIENTS) return 0;
+	t = AAS_Time() - ig_padseen[client];
+	if (ig_padseen[client] <= 0 || t < 0 || t > 0.25f) return 0;
+	VectorCopy(ig_padend[client], end);
+	return 1;
+}

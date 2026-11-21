@@ -279,8 +279,27 @@ static int IG_RouteAhead(bot_state_t *bs, bot_goal_t *goal, vec3_t target)
 	return VectorLength(d) >= IG_MIN_RUN;
 }
 
+/* For a chain already moving: the route a short way ahead, somewhere the bot's
+ * speed is already taking it (the long straight run IG_RouteAhead asks for is
+ * for starting one). */
+static int IG_RouteNear(bot_state_t *bs, bot_goal_t *goal, vec3_t target)
+{
+	vec3_t d, v;
+	float speed;
+
+	VectorCopy(bs->cur_ps.velocity, v);
+	v[2] = 0;
+	speed = VectorNormalize(v);
+	if (speed < 200) return 0;
+	if (!trap_BotMovementViewTarget(bs->ms, goal, bs->tfl, 300, target)) return 0;
+	VectorSubtract(target, bs->origin, d);
+	d[2] = 0;
+	if (VectorNormalize(d) < 100) return 0;
+	return DotProduct(d, v) > 0.5f;
+}
+
 /* An anchor ahead toward `target`, from where the bot is now. */
-static int IG_FindAnchor(bot_state_t *bs, const vec3_t target, vec3_t anchor)
+static int IG_FindAnchorYaw(bot_state_t *bs, float baseyaw, vec3_t anchor)
 {
 	/* Billy's slingshot: the FLOOR ahead, 10-22 degrees down, straight the way
 	 * the bot is moving -- so it only tips its view down, never has to turn
@@ -288,21 +307,12 @@ static int IG_FindAnchor(bot_state_t *bs, const vec3_t target, vec3_t anchor)
 	 * are the combat hook's and the climbs'). His middle first. */
 	static const float pitches[] = { 14, 18, 10, 24, 8, 30 };
 	static const float yaws[] = { 0, 12, -12, 25, -25 };
-	vec3_t dir, flat, end, mid, angles, v;
+	vec3_t dir, flat, end, mid, angles;
 	vec3_t mins = {-16, -16, -24}, maxs = {16, 16, 32};
 	bsp_trace_t tr;
-	float d, baseyaw;
+	float d;
 	int i, k;
 
-	(void)target;
-	/* around the way it moves (the flick turns the view there) */
-	VectorCopy(bs->cur_ps.velocity, v);
-	v[2] = 0;
-	baseyaw = bs->viewangles[YAW];
-	if (VectorNormalize(v) > 100) {
-		vectoangles(v, angles);
-		baseyaw = angles[YAW];
-	}
 	for (k = 0; k < 5; k++) {
 		for (i = 0; i < 6; i++) {
 			VectorSet(angles, pitches[i], baseyaw + yaws[k], 0);
@@ -330,6 +340,29 @@ static int IG_FindAnchor(bot_state_t *bs, const vec3_t target, vec3_t anchor)
 		}
 	}
 	return 0;
+}
+
+/* along the way it moves, then toward the route ahead: in a bend, the next
+ * hook of a chain is round the corner (chains ended there for want of one) */
+static int IG_FindAnchor(bot_state_t *bs, const vec3_t target, vec3_t anchor)
+{
+	vec3_t v, angles;
+	float velyaw = bs->viewangles[YAW], routeyaw;
+
+	VectorCopy(bs->cur_ps.velocity, v);
+	v[2] = 0;
+	if (VectorNormalize(v) > 100) {
+		vectoangles(v, angles);
+		velyaw = angles[YAW];
+	}
+	if (IG_FindAnchorYaw(bs, velyaw, anchor)) return 1;
+	VectorSubtract(target, bs->origin, v);
+	v[2] = 0;
+	if (VectorNormalize(v) < 64) return 0;
+	vectoangles(v, angles);
+	routeyaw = angles[YAW];
+	if (fabs(AngleDifference(routeyaw, velyaw)) < 20) return 0;     /* the same search */
+	return IG_FindAnchorYaw(bs, routeyaw, anchor);
 }
 
 /* Is p ahead of the bot, the way it is moving? */
@@ -518,7 +551,11 @@ static void IG_SlingshotStep(bot_state_t *bs, bot_goal_t *goal, bot_moveresult_t
 	case IG_SLING_AFTER:
 		/* the next hook of the chain: OSP's wait, then from the air, or a new jump from the ground */
 		if (FloatTime() - s->time < IG_REHOOK) return;
-		if (FloatTime() - s->time > IG_CHAIN_WINDOW || !IG_RouteAhead(bs, goal, target)) {
+		if (FloatTime() - s->time <= IG_CHAIN_WINDOW && !IG_RouteAhead(bs, goal, target) && IG_RouteNear(bs, goal, target)) {
+			/* the route bends: a fast bot keeps chaining toward its nearer part
+			 * (Billy: more chains, more bots flying down hallways) */
+		}
+		else if (FloatTime() - s->time > IG_CHAIN_WINDOW || !IG_RouteAhead(bs, goal, target)) {
 			BotAI_Print(PRT_MESSAGE, "ig: chain end %d %s\n", c, FloatTime() - s->time > IG_CHAIN_WINDOW ? "window" : "route");
 			IG_SlingEnd(s);
 			return;
@@ -907,10 +944,141 @@ static void IG_StrafeJump(bot_state_t *bs, bot_goal_t *goal, bot_moveresult_t *m
 
 /* From the route nodes (ai_dmnet.c): the hook techniques first, then, with
  * no hook busy, strafe jumping. */
+/* IG-13: the pad hook. Flying a jump pad's arc, the bot hooks the floor just
+ * past the landing spot and lets go nearly over it: OSP's pull (975 u/s, a
+ * straight line) beats the slow top of the arc (Billy: "when a jump pad is
+ * taken, the bot uses the grappling hook to get to the landing spot faster"). */
+#define IG_PAD_MIN      250     /* closer than this, the arc is as quick */
+#define IG_PAD_SETTLE   0.15f   /* seconds after the launch before it hooks */
+#define IG_PAD_RELEASE  110     /* let go this close (horizontally) to the landing */
+#define IG_PAD_MAXPULL  1.0f
+enum { IG_PAD_NONE, IG_PAD_AIMING, IG_PAD_HOOKED, IG_PAD_DONE };
+static struct { int state; float start, time, dist0; vec3_t anchor, land; } ig_pad[MAX_CLIENTS];
+
+static int IG_PadOn(void)
+{
+	return trap_Cvar_VariableIntegerValue("ig_padhook") && trap_Cvar_VariableIntegerValue("ig_hookdetect");
+}
+
+/* The hook point: whatever is behind a spot a little above the landing, on
+ * the line from the eye through it -- the far wall, or the floor beyond. The
+ * pull then carries the bot over the landing, where it lets go. (The floor
+ * at the landing itself is hidden behind the ledge's edge for most of a
+ * climb.) */
+static int IG_PadAnchor(bot_state_t *bs, const vec3_t land, vec3_t anchor)
+{
+	vec3_t fwd, aim, end, d;
+	bsp_trace_t tr;
+	float tolanding;
+
+	VectorSubtract(land, bs->origin, fwd);
+	fwd[2] = 0;
+	if (VectorNormalize(fwd) < IG_PAD_MIN) return 0;
+	/* the whole body must clear the ledge's lip on the way, not only the eye:
+	 * pulled along the eye's line, the feet caught the edge and it hung there
+	 * (30% of pad hooks pulled a full second without arriving) */
+	{
+		vec3_t mins = {-16, -16, -24}, maxs = {16, 16, 32}, over;
+
+		VectorCopy(land, over);
+		over[2] += 64;
+		BotAI_Trace(&tr, bs->origin, mins, maxs, over, bs->entitynum, MASK_SOLID);
+		if (tr.fraction < 1 || tr.startsolid) return 0;
+	}
+	VectorCopy(land, aim);
+	aim[2] += 64 + bs->cur_ps.viewheight;
+	VectorSubtract(aim, bs->eye, d);
+	tolanding = VectorNormalize(d);
+	VectorMA(bs->eye, tolanding + 600, d, end);
+	if (!IG_AnchorTrace(bs, end, &tr)) return 0;
+	if (tr.fraction * (tolanding + 600) < tolanding + 24) return 0;   /* blocked short of the landing */
+	VectorCopy(tr.endpos, anchor);
+	return 1;
+}
+
+/* true while it owns the bot's hook and view */
+static int IG_PadHook(bot_state_t *bs)
+{
+	int c = bs->client;
+	vec3_t land, d, hookpos;
+
+	if (c < 0 || c >= MAX_CLIENTS || !trap_Cvar_VariableIntegerValue("ig_hookdetect")) return 0;
+	if (ig_pad[c].time > FloatTime() + 1) ig_pad[c].state = IG_PAD_NONE;      /* a new map */
+	switch (ig_pad[c].state) {
+	case IG_PAD_DONE:
+		if (!IG_OnGround(bs)) return 0;
+		BotAI_Print(PRT_MESSAGE, "ig: padflight %d hooked %.2f dist %.0f\n", c, FloatTime() - ig_pad[c].start, ig_pad[c].dist0);
+		ig_pad[c].state = IG_PAD_NONE;
+		ig_pad[c].start = 0;
+		return 0;
+	case IG_PAD_NONE:
+		if (IG_OnGround(bs) || !IG_PadFlight(c, land)) {
+			if (ig_pad[c].start > 0 && IG_OnGround(bs))
+				BotAI_Print(PRT_MESSAGE, "ig: padflight %d plain %.2f dist %.0f\n", c, FloatTime() - ig_pad[c].start, ig_pad[c].dist0);
+			ig_pad[c].start = 0;
+			return 0;
+		}
+		if (ig_pad[c].start <= 0) {
+			ig_pad[c].start = FloatTime();
+			VectorSubtract(land, bs->origin, d);
+			d[2] = 0;
+			ig_pad[c].dist0 = VectorLength(d);
+		}
+		if (!IG_PadOn()) return 0;
+		if (FloatTime() - ig_pad[c].start < IG_PAD_SETTLE) return 0;
+		if (ig_sling[c].state != IG_SLING_IDLE && ig_sling[c].state != IG_SLING_AFTER) return 0;
+		if (ig_fight[c].state != IG_FIGHT_NONE) return 0;
+		if (!IG_PadAnchor(bs, land, ig_pad[c].anchor)) return 0;
+		VectorCopy(land, ig_pad[c].land);
+		ig_pad[c].state = IG_PAD_AIMING;
+		ig_pad[c].time = FloatTime();
+		/* fall through */
+	case IG_PAD_AIMING:
+		if (IG_OnGround(bs) || FloatTime() - ig_pad[c].time > 0.5f) {
+			ig_pad[c].state = IG_PAD_DONE;
+			return 0;
+		}
+		if (!IG_FlickReady(bs, ig_pad[c].anchor)) return 1;
+		if (!IG_CanFireHook(c)) return 1;
+		trap_EA_Command(c, LibVarGetString("cmd_grappleon"));
+		IG_NoteHookFire(c);
+		IG_GrappleTravelNote(c);
+		VectorSubtract(ig_pad[c].land, bs->origin, d);
+		BotAI_Print(PRT_MESSAGE, "ig: padhook %d dist %.0f\n", c, VectorLength(d));
+		ig_pad[c].state = IG_PAD_HOOKED;
+		ig_pad[c].time = FloatTime();
+		return 1;
+	case IG_PAD_HOOKED:
+		IG_GrappleTravelNote(c);
+		VectorSubtract(ig_pad[c].land, bs->origin, d);
+		d[2] = 0;
+		{
+			const char *why =
+				VectorLength(d) < IG_PAD_RELEASE && bs->origin[2] > ig_pad[c].land[2] - 32 ? "near" :
+				IG_OnGround(bs) ? "ground" :
+				FloatTime() - ig_pad[c].time > IG_PAD_MAXPULL ? "time" :
+				(FloatTime() - ig_pad[c].time > 0.5f && !IG_HookNear(ig_pad[c].anchor, 300, hookpos)) ? "lost" : NULL;
+			if (!why) {
+				/* steer for the landing while pulled */
+				VectorNormalize(d);
+				EA_Move(c, d, 400);
+				return 1;
+			}
+			trap_EA_Command(c, LibVarGetString("cmd_grappleoff"));
+			BotAI_Print(PRT_MESSAGE, "ig: padhook release %d why %s after %.2f left %.0f\n", c, why,
+						FloatTime() - ig_pad[c].time, VectorLength(d));
+			ig_pad[c].state = IG_PAD_DONE;
+			return 0;
+		}
+	}
+	return 0;
+}
+
 void IG_Slingshot(bot_state_t *bs, bot_goal_t *goal, bot_moveresult_t *moveresult)
 {
 	int c = bs->client;
 
+	if (IG_PadHook(bs)) return;      /* IG-13: flying a pad, hooking its landing */
 	IG_SlingshotStep(bs, goal, moveresult);
 	if (c < 0 || c >= MAX_CLIENTS) return;
 	/* steering is the move, not the view: it goes on while a slingshot jumps
