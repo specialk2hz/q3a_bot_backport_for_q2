@@ -12,8 +12,14 @@ void IG_RoamReplace(bot_state_t *bs, int tfl);
 #define IG_KILLEDBY 3
 void IG_Evidence(int bot, int enemy, const vec3_t pos);
 void IG_EvidenceKind(int bot, int enemy, const vec3_t pos, int kind);
-void IG_Debug(bot_state_t *bs, const char *fmt, ...);
+#define IG_DBG_RARE   0
+#define IG_DBG_HUNT   1
+#define IG_DBG_CHATTY 2
+void IG_Debug(bot_state_t *bs, int kind, const char *fmt, ...);
 int  IG_LastEvidence(int bot, int enemy, vec3_t pos, float *time);
+
+/* ai_ig_sling.c */
+void IG_Slingshot(bot_state_t *bs, bot_goal_t *goal, bot_moveresult_t *moveresult);
 
 /* ai_ig_revenge.c */
 int  IG_RevengeTarget(bot_state_t *bs);

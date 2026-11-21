@@ -330,6 +330,29 @@ static void IG_RouteFailed(int reachnum)
 	IG_TakeOut(reachnum, "did not land");
 }
 
+/* A hook near `point`: 0 none, 1 one in flight, 2 one latched (not moving),
+ * its position in hookpos. For a slingshot (game_q3/ai_ig_sling.c), whose hook
+ * lands near, not on, the anchor it was aimed at. */
+int IG_HookNear(const vec3_t point, float radius, vec3_t hookpos)
+{
+	int i, found = 0;
+	vec3_t d;
+	aas_entityinfo_t entinfo;
+
+	for (i = AAS_NextEntity(0); i; i = AAS_NextEntity(i))
+	{
+		if (AAS_EntityType(i) != 3 /* ET_MISSILE */) continue;
+		AAS_EntityInfo(i, &entinfo);
+		if (entinfo.weapon != IG_GRAPPLE_WEAPON) continue;
+		VectorSubtract(entinfo.origin, point, d);
+		if (VectorLength(d) > radius) continue;
+		VectorCopy(entinfo.origin, hookpos);
+		if (VectorCompare(entinfo.origin, entinfo.lastvisorigin)) return 2;
+		found = 1;
+	}
+	return found;
+}
+
 /* Called once the AAS file is loaded, before the routing is initialised. */
 void IG_AdjustGrappleCosts(void)
 {

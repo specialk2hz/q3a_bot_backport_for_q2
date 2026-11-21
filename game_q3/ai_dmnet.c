@@ -1950,6 +1950,7 @@ int AINode_Seek_LTG(bot_state_t *bs)
 		}
 		bs->ideal_viewangles[2] *= 0.5;
 	}
+	IG_Slingshot(bs, &goal, &moveresult); /* IG: jump, hook ahead, let go (IG-9) */
 	//if the weapon is used for the bot movement
 	if (moveresult.flags & MOVERESULT_MOVEMENTWEAPON) bs->weaponnum = moveresult.weapon;
 	//

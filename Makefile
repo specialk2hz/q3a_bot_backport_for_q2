@@ -585,6 +585,7 @@ BOTLIB_OBJS_ = \
 	game_q3/ai_dmq3.o \
 	game_q3/ai_ig_roam.o \
 	game_q3/ai_ig_revenge.o \
+	game_q3/ai_ig_sling.o \
 	game_q3/ai_team.o \
 	game_q3/ai_chat.o \
 	game_q3/ai_cmd.o \

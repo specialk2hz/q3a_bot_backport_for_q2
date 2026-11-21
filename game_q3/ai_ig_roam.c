@@ -73,13 +73,26 @@ void IG_Evidence(int bot, int enemy, const vec3_t pos)
 	IG_EvidenceKind(bot, enemy, pos, IG_KILLEDBY);
 }
 
-/* ig_debug: say it, so a person in the game can judge the choice. */
-void IG_Debug(bot_state_t *bs, const char *fmt, ...)
+/* ig_debug: say it, so a person in the game can judge the choice.
+ * IG_DBG_RARE lines (grudges, slingshots) always; IG_DBG_HUNT lines at most
+ * one per bot every IG_DBG_GAP seconds; IG_DBG_CHATTY lines only at
+ * ig_debug 2, which also lifts the gap. */
+#define IG_DBG_GAP 10
+static float ig_dbglast[MAX_CLIENTS];
+
+void IG_Debug(bot_state_t *bs, int kind, const char *fmt, ...)
 {
 	va_list ap;
 	char buf[256];
+	int level = trap_Cvar_VariableIntegerValue("ig_debug"), c = bs->client;
 
-	if (!trap_Cvar_VariableIntegerValue("ig_debug")) return;
+	if (level <= 0 || c < 0 || c >= MAX_CLIENTS) return;
+	if (kind == IG_DBG_CHATTY && level < 2) return;
+	if (kind == IG_DBG_HUNT && level < 2) {
+		if (ig_dbglast[c] > FloatTime()) ig_dbglast[c] = 0;       /* a new map */
+		if (FloatTime() - ig_dbglast[c] < IG_DBG_GAP) return;
+		ig_dbglast[c] = FloatTime();
+	}
 	va_start(ap, fmt);
 	Q_vsnprintf(buf, sizeof(buf), fmt, ap);
 	va_end(ap);
@@ -193,7 +206,7 @@ void IG_RoamReplace(bot_state_t *bs, int tfl)
 	if (!(goal.flags & GFL_ROAM) || goal.number != 0) return;
 	enemy = IG_HuntTrace(bs, pos, &time);
 	if (enemy < 0) {
-		IG_Debug(bs, "nothing fresh to hunt, wandering");
+		IG_Debug(bs, IG_DBG_CHATTY, "nothing fresh to hunt, wandering");
 		return;
 	}
 	area = BotPointAreaNum(pos);
@@ -203,10 +216,14 @@ void IG_RoamReplace(bot_state_t *bs, int tfl)
 		char name[64];
 		int k = ig_traces[c][enemy].kind;
 
-		IG_Debug(bs, "%shunting %s: %s them %.0f s ago",
+		static int announced[MAX_CLIENTS];      /* 1 + the last target announced */
+
+		if (announced[c] != enemy + 1 || IG_RevengeTarget(bs) == enemy)
+		IG_Debug(bs, IG_RevengeTarget(bs) == enemy ? IG_DBG_RARE : IG_DBG_HUNT, "%shunting %s: %s them %.0f s ago",
 				 IG_RevengeTarget(bs) == enemy ? "REVENGE: " : "",
 				 ClientName(enemy, name, sizeof(name)), how[k >= 1 && k <= 3 ? k : 0],
 				 FloatTime() - time);
+		announced[c] = enemy + 1;
 	}
 	trap_BotPopGoal(bs->gs);
 	memset(&goal, 0, sizeof(goal));

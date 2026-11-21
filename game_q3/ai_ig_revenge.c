@@ -73,7 +73,7 @@ void IG_RevengeDeath(bot_state_t *bs, int attacker)
 		ig_nemesis[c] = attacker + 1;
 		ig_nemesis_until[c] = FloatTime() + IG_Libvar("ig_revenge_time", 20);
 		BotAI_Print(PRT_MESSAGE, "ig: revenge %d on %d\n", c, attacker);
-		{ char name[64]; IG_Debug(bs, "grudge: %s killed me twice", ClientName(attacker, name, sizeof(name))); }
+		{ char name[64]; IG_Debug(bs, IG_DBG_RARE, "grudge: %s killed me twice", ClientName(attacker, name, sizeof(name))); }
 	}
 	ig_lastkiller[c] = attacker + 1;
 	ig_lastkilled[c] = FloatTime();
@@ -87,7 +87,7 @@ void IG_RevengeKill(bot_state_t *bs, int target)
 	if (c < 0 || c >= MAX_CLIENTS || !ig_nemesis[c]) return;
 	if (ig_nemesis[c] != target + 1) return;
 	BotAI_Print(PRT_MESSAGE, "ig: revenge kill %d on %d\n", c, target);
-	{ char name[64]; IG_Debug(bs, "revenge on %s", ClientName(target, name, sizeof(name))); }
+	{ char name[64]; IG_Debug(bs, IG_DBG_RARE, "revenge on %s", ClientName(target, name, sizeof(name))); }
 	ig_nemesis[c] = 0;
 	/* a settled score is not a grudge */
 	ig_lastkiller[c] = 0;
