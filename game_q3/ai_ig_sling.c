@@ -49,7 +49,7 @@ void EA_Jump(int client);
 #define IG_LOOKAHEAD     700    /* how far along the route it looks */
 #define IG_MIN_RUN       250    /* the route must run on this far, horizontally */
 #define IG_ANCHOR_MIN    180
-#define IG_ANCHOR_MAX    450
+#define IG_ANCHOR_MAX    700
 #define IG_JUMP_AIM      0.15f  /* seconds into the jump to pick the anchor */
 #define IG_AIM_TIME      0.5f   /* seconds to get aimed and fire */
 #define IG_AIM_TOL       4      /* degrees: looser was sloppy -- misses that drop the bot */
@@ -339,7 +339,7 @@ static void IG_SlingEnd(ig_sling_t *s)
 }
 
 /* From AINode_Seek_LTG (ai_dmnet.c), after the route's movement and view. */
-void IG_Slingshot(bot_state_t *bs, bot_goal_t *goal, bot_moveresult_t *moveresult)
+static void IG_SlingshotStep(bot_state_t *bs, bot_goal_t *goal, bot_moveresult_t *moveresult)
 {
 	ig_sling_t *s;
 	vec3_t target, d, hookpos;
@@ -787,4 +787,98 @@ int IG_LavaEscape(bot_state_t *bs)
 		return 1;
 	}
 	return 0;
+}
+
+/* ------------------------------------------------------------------------
+ * Strafe jumping (IG-11). Quake II caps the speed a player WISHES to move at
+ * (300) but not the speed it moves at in the air, where it accelerates by
+ * wishspeed * frametime along the wish direction (PM_Accelerate with 1, as
+ * pm_airaccelerate is 0). Wishing at the angle whose cosine is
+ * (wishspeed - accel) / speed to the velocity adds the most speed each
+ * frame -- about 26 degrees at 300, wider as it grows -- and a jump on the
+ * landing frame skips the ground's friction. On a long straight stretch of
+ * route at running speed the bot jumps, steers so in the air toward the side
+ * the route bends (alternating when it runs straight), and jumps again on
+ * landing; it stops where the route turns, the floor ahead is not safe, or a
+ * hook takes over. libvar ig_strafe 1 (default 0).
+ * ------------------------------------------------------------------------ */
+
+#define IG_STRAFE_START  250    /* running at least this fast to start */
+#define IG_STRAFE_WISH   300    /* Quake II's pm_maxspeed */
+#define IG_STRAFE_DT     0.1f   /* a bot's usercmd covers a server frame */
+
+static struct { int on; float side; int hops; } ig_strafe[MAX_CLIENTS];
+
+static void IG_StrafeJump(bot_state_t *bs, bot_goal_t *goal, bot_moveresult_t *mr)
+{
+	int c = bs->client;
+	vec3_t target, tdir, v, wish, perp;
+	float speed, cross, cosang, ang, a;
+
+	if (!trap_Cvar_VariableIntegerValue("ig_strafe")) return;
+	if (!IG_RouteAhead(bs, goal, target)) { ig_strafe[c].on = 0; return; }
+	VectorSubtract(target, bs->origin, tdir);
+	tdir[2] = 0;
+	VectorNormalize(tdir);
+	VectorCopy(bs->cur_ps.velocity, v);
+	v[2] = 0;
+	speed = VectorNormalize(v);
+	if (IG_OnGround(bs)) {
+		/* a landing mid-run keeps going on looser terms than a start: the
+		 * speed is already there and a check failing here threw it away */
+		int go = ig_strafe[c].on
+			? DotProduct(v, tdir) > 0.5f && IG_SafeCorridor(bs, v, 400)
+			: (mr->traveltype & TRAVELTYPE_MASK) == TRAVEL_WALK &&
+			  !(mr->flags & (MOVERESULT_MOVEMENTVIEWSET | MOVERESULT_WAITING | MOVERESULT_ONTOPOFOBSTACLE)) &&
+			  speed >= IG_STRAFE_START && DotProduct(v, tdir) >= 0.7f && IG_SafeCorridor(bs, tdir, 500);
+		if (!go) {
+			if (ig_strafe[c].on) BotAI_Print(PRT_MESSAGE, "ig: strafe end %d ground hops %d speed %.0f\n", c, ig_strafe[c].hops, speed);
+			ig_strafe[c].on = 0;
+			return;
+		}
+		EA_Jump(c);
+		if (!ig_strafe[c].on) { BotAI_Print(PRT_MESSAGE, "ig: strafe %d start %.0f\n", c, speed); ig_strafe[c].hops = 0; }
+		else BotAI_Print(PRT_MESSAGE, "ig: strafe hop %d n %d speed %.0f\n", c, ++ig_strafe[c].hops, speed);
+		ig_strafe[c].on = 1;
+		ig_strafe[c].side = -ig_strafe[c].side;
+		if (!ig_strafe[c].side) ig_strafe[c].side = 1;
+		return;
+	}
+	if (!ig_strafe[c].on) return;
+	if (speed < 50 || DotProduct(v, tdir) < 0.5f) {   /* the route turned */
+		BotAI_Print(PRT_MESSAGE, "ig: strafe end %d turned hops %d speed %.0f\n", c, ig_strafe[c].hops, speed);
+		ig_strafe[c].on = 0;
+		return;
+	}
+	cross = v[0] * tdir[1] - v[1] * tdir[0];
+	if (cross > 0.05f) ig_strafe[c].side = 1;
+	else if (cross < -0.05f) ig_strafe[c].side = -1;
+	a = IG_STRAFE_WISH * IG_STRAFE_DT;
+	cosang = (IG_STRAFE_WISH - a) / (speed > IG_STRAFE_WISH ? speed : IG_STRAFE_WISH);
+	if (cosang > 1) cosang = 1;
+	if (cosang < 0) cosang = 0;
+	ang = acos(cosang);
+	VectorSet(perp, -v[1], v[0], 0);
+	VectorScale(v, cos(ang), wish);
+	VectorMA(wish, ig_strafe[c].side * sin(ang), perp, wish);
+	EA_Move(c, wish, 400);
+}
+
+/* From the route nodes (ai_dmnet.c): the hook techniques first, then, with
+ * no hook busy, strafe jumping. */
+void IG_Slingshot(bot_state_t *bs, bot_goal_t *goal, bot_moveresult_t *moveresult)
+{
+	int c = bs->client;
+
+	IG_SlingshotStep(bs, goal, moveresult);
+	if (c < 0 || c >= MAX_CLIENTS) return;
+	/* steering is the move, not the view: it goes on while a slingshot jumps
+	 * and aims, and pauses only while a hook pulls */
+	if (ig_sling[c].state == IG_SLING_HOOKED || ig_fight[c].state != IG_FIGHT_NONE ||
+		ig_lava[c].state != IG_LAVA_NONE || BotInLavaOrSlime(bs)) {
+		if (ig_sling[c].state != IG_SLING_HOOKED) ig_strafe[c].on = 0;
+		return;
+	}
+	if (ig_sling[c].state != IG_SLING_IDLE && IG_OnGround(bs)) return;     /* the slingshot's own jump */
+	IG_StrafeJump(bs, goal, moveresult);
 }
