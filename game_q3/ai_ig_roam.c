@@ -30,6 +30,7 @@ of the License, or (at your option) any later version.
 #include "ai_main.h"
 #include "ai_dmq3.h"
 #include "ai_ig.h"
+#include "chars.h"
 
 #define IG_SEE_FOV      120
 #define IG_SEE_DIST     3000
@@ -37,6 +38,9 @@ of the License, or (at your option) any later version.
 #define IG_PASS_DIST    160     /* this close to a hunt goal, choose the next */
 #define IG_HUNT_LTG     10      /* seconds a hunt goal is kept at most */
 #define IG_REPLAN_NEWER 3       /* a trace this much fresher re-plans the hunt */
+#define IG_SHARE_DIST   400     /* another bot hunting within this of a trace has it */
+#define IG_NEAR_SCALE   800     /* a trace this far away is worth half one at the bot's feet */
+#define IG_HEARD_WEIGHT 0.6f    /* a sound is worth less than a sighting */
 
 typedef struct {
 	vec3_t pos;
@@ -157,12 +161,29 @@ void IG_RoamThink(bot_state_t *bs)
 	}
 }
 
-/* The trace to hunt: the revenge target's if there is one, else the
- * freshest, if fresh enough and not where the bot already is. */
+/* Is another bot already hunting this enemy, or near this spot? Without the
+ * check every bot that heard the same rail shot went to it, and the fight it
+ * found drew them all in again: crowded 15% -> 23% of the time. */
+static int IG_TraceTaken(int c, int enemy, const vec3_t p)
+{
+	int b;
+	vec3_t d;
+
+	for (b = 0; b < MAX_CLIENTS; b++) {
+		if (b == c || !ig_hunting[b]) continue;
+		if (ig_hunting[b] == enemy + 1) return 1;
+		VectorSubtract(ig_huntpos[b], p, d);
+		if (VectorLength(d) < IG_SHARE_DIST) return 1;
+	}
+	return 0;
+}
+
+/* The trace to hunt: the revenge target's if there is one; else the best
+ * by freshness, kind and nearness that no other bot is already after. */
 static int IG_HuntTrace(bot_state_t *bs, vec3_t pos, float *time)
 {
 	int i, best = -1, nemesis;
-	float t, besttime = 0, memory = IG_HuntMemory();
+	float t, score, bestscore = 0, memory = IG_HuntMemory();
 	vec3_t p, dir;
 
 	nemesis = IG_RevengeTarget(bs);
@@ -174,17 +195,22 @@ static int IG_HuntTrace(bot_state_t *bs, vec3_t pos, float *time)
 			return nemesis;
 		}
 	}
+	*time = 0;
 	for (i = 0; i < maxclients && i < MAX_CLIENTS; i++) {
 		if (i == bs->client) continue;
 		if (!IG_LastEvidence(bs->client, i, p, &t)) continue;
-		if (FloatTime() - t > memory || t <= besttime) continue;
+		if (FloatTime() - t > memory) continue;
 		VectorSubtract(p, bs->origin, dir);
 		if (VectorLength(dir) < IG_PASS_DIST) continue;
+		if (IG_TraceTaken(bs->client, i, p)) continue;
+		score = (1 - (FloatTime() - t) / memory) / (1 + VectorLength(dir) / IG_NEAR_SCALE);
+		if (ig_traces[bs->client][i].kind == IG_HEARD) score *= IG_HEARD_WEIGHT;
+		if (score <= bestscore) continue;
 		best = i;
-		besttime = t;
+		bestscore = score;
+		*time = t;
 		VectorCopy(p, pos);
 	}
-	*time = besttime;
 	return best;
 }
 
@@ -204,6 +230,14 @@ void IG_RoamReplace(bot_state_t *bs, int tfl)
 	/* only AAS_RandomGoalArea's goal: GFL_ROAM and no item (an
 	 * item_botroam goal is GFL_ROAM with an item number) */
 	if (!(goal.flags & GFL_ROAM) || goal.number != 0) return;
+	/* how often it hunts is the character's: 25% for the least aggressive,
+	 * 85% for the most; the rest of the time the goal stays as it was (for
+	 * now the random one, later high ground or a patrol). A grudge always. */
+	if (IG_RevengeTarget(bs) < 0 &&
+		random() > 0.25f + 0.6f * trap_Characteristic_BFloat(bs->character, CHARACTERISTIC_AGGRESSION, 0, 1)) {
+		IG_Debug(bs, IG_DBG_CHATTY, "not hunting this time");
+		return;
+	}
 	enemy = IG_HuntTrace(bs, pos, &time);
 	if (enemy < 0) {
 		IG_Debug(bs, IG_DBG_CHATTY, "nothing fresh to hunt, wandering");
