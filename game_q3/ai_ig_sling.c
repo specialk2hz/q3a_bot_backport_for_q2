@@ -285,6 +285,31 @@ static int IG_SafeCorridor(bot_state_t *bs, const vec3_t flat, float length)
  * fall more than IG_WALKWAY_DROP below the lower of the bot's feet and the
  * route point it aims at, so a route that goes down still may. */
 #define IG_WALKWAY_DROP 48
+#define IG_WALKWAY_SIDE 192     /* how far to each side lava counts as "beside" */
+/* Lava or slime beside the line (either side, IG_WALKWAY_SIDE off), out to
+ * where the flight ends: only there does leaving the walkway matter. Applied
+ * everywhere, the rule cost q2dm1 (no lava) a third of its slingshots. */
+static int IG_LavaBeside(bot_state_t *bs, const vec3_t flat, float length)
+{
+	vec3_t p, side, down;
+	bsp_trace_t tr;
+	float t;
+	int k;
+
+	VectorSet(side, -flat[1], flat[0], 0);
+	for (t = IG_CORRIDOR_STEP; t <= length; t += IG_CORRIDOR_STEP) {
+		for (k = -1; k <= 1; k += 2) {
+			VectorMA(bs->origin, t, flat, p);
+			VectorMA(p, k * IG_WALKWAY_SIDE, side, p);
+			VectorCopy(p, down);
+			down[2] -= 700;
+			BotAI_Trace(&tr, p, NULL, NULL, down, bs->entitynum, MASK_SOLID | IG_LIQUIDS);
+			if (!tr.startsolid && tr.fraction < 1 && (tr.contents & IG_LIQUIDS)) return 1;
+		}
+	}
+	return 0;
+}
+
 static int IG_WalkwayCorridor(bot_state_t *bs, const vec3_t flat, float length, const vec3_t target)
 {
 	vec3_t p, down;
@@ -293,6 +318,7 @@ static int IG_WalkwayCorridor(bot_state_t *bs, const vec3_t flat, float length, 
 
 	if (!IG_SafeCorridor(bs, flat, length)) return 0;
 	if (!trap_Cvar_VariableIntegerValue("ig_walkway")) return 1;
+	if (!IG_LavaBeside(bs, flat, length + 300)) return 1;
 	minz = bs->origin[2] - 24;                          /* the feet */
 	if (target && target[2] - 24 < minz) minz = target[2] - 24;
 	minz -= IG_WALKWAY_DROP;
@@ -377,9 +403,10 @@ static int IG_FindAnchorYaw(bot_state_t *bs, float baseyaw, vec3_t anchor)
 			VectorMA(bs->origin, IG_RELEASE_FRAC * d, flat, mid);
 			BotAI_Trace(&tr, bs->origin, mins, maxs, mid, bs->entitynum, MASK_SOLID | IG_LIQUIDS);
 			if (tr.fraction < 1) continue;
-			/* safe floor all the way the speed will carry it */
-			if (!IG_SafeCorridor(bs, flat, d + 300)) continue;
+			/* safe floor all the way the speed will carry it -- and, with
+			 * IG-29 on, on the walkway along the line the pull throws it */
 			VectorMA(bs->eye, d, dir, anchor);
+			if (!IG_WalkwayCorridor(bs, flat, d + 300, anchor)) continue;
 			return 1;
 		}
 	}
@@ -836,7 +863,8 @@ static int IG_FightAnchor(bot_state_t *bs, vec3_t anchor, int wide)
 				VectorCopy(dir, flat);
 				flat[2] = 0;
 				VectorNormalize(flat);
-				if (!IG_SafeCorridor(bs, flat, d + 200)) continue;
+				VectorMA(bs->eye, d, dir, anchor);
+				if (!IG_WalkwayCorridor(bs, flat, d + 200, anchor)) continue;   /* IG-29 */
 			}
 			VectorMA(bs->eye, d, dir, anchor);
 			return 1;
