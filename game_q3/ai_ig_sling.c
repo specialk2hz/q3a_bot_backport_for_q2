@@ -1116,8 +1116,10 @@ int IG_LavaEscape(bot_state_t *bs)
 #define IG_STRAFE_START  250    /* running at least this fast to start */
 #define IG_STRAFE_WISH   300    /* Quake II's pm_maxspeed */
 #define IG_STRAFE_DT     0.1f   /* a bot's usercmd covers a server frame */
+#define IG_STRAFE_CARVE  (75 * M_PI / 180)  /* IG-31: the most it wishes off its velocity to follow a bend */
 
-static struct { int on; float side; int hops; } ig_strafe[MAX_CLIENTS];
+static struct { int on; float side; int hops; int stale; vec3_t tdir; } ig_strafe[MAX_CLIENTS];
+static float Distance2D(const vec3_t a, const vec3_t b) { return sqrt((a[0]-b[0])*(a[0]-b[0]) + (a[1]-b[1])*(a[1]-b[1])); }
 
 static void IG_StrafeJump(bot_state_t *bs, bot_goal_t *goal, bot_moveresult_t *mr)
 {
@@ -1125,8 +1127,17 @@ static void IG_StrafeJump(bot_state_t *bs, bot_goal_t *goal, bot_moveresult_t *m
 	vec3_t target, tdir, v, wish, perp;
 	float speed, cross, cosang, ang, a;
 
-	if (!trap_Cvar_VariableIntegerValue("ig_strafe")) return;
-	if (!IG_RouteAhead(bs, goal, target)) { ig_strafe[c].on = 0; return; }
+	int mode = trap_Cvar_VariableIntegerValue("ig_strafe");
+
+	if (!mode) return;
+	/* IG-31 (ig_strafe 2): a chain already going follows the route a short
+	 * way ahead, through its bends, instead of needing a long straight run */
+	if (!(mode >= 2 && ig_strafe[c].on && trap_BotMovementViewTarget(bs->ms, goal, bs->tfl, 300, target)) &&
+		!IG_RouteAhead(bs, goal, target)) {
+		if (ig_strafe[c].on && mode >= 2) BotAI_Print(PRT_MESSAGE, "ig: strafe end %d noroute hops %d\n", c, ig_strafe[c].hops);
+		ig_strafe[c].on = 0;
+		return;
+	}
 	VectorSubtract(target, bs->origin, tdir);
 	tdir[2] = 0;
 	VectorNormalize(tdir);
@@ -1134,29 +1145,83 @@ static void IG_StrafeJump(bot_state_t *bs, bot_goal_t *goal, bot_moveresult_t *m
 	v[2] = 0;
 	speed = VectorNormalize(v);
 	if (IG_OnGround(bs)) {
+		int go;
+		/* IG-31: landing just past the route's next point, the route points
+		 * back at it; one more hop along the last good direction picks the
+		 * route up further on */
+		if (mode >= 2 && ig_strafe[c].on && speed >= 250 &&
+			(DotProduct(v, tdir) <= 0 || Distance2D(target, bs->origin) < 96) &&
+			ig_strafe[c].stale < 1 && DotProduct(v, ig_strafe[c].tdir) > 0.3f &&
+			IG_SafeCorridor(bs, ig_strafe[c].tdir, 300)) {
+			VectorCopy(ig_strafe[c].tdir, tdir);
+			ig_strafe[c].stale++;
+		}
+		else ig_strafe[c].stale = 0;
 		/* a landing mid-run keeps going on looser terms than a start: the
 		 * speed is already there and a check failing here threw it away */
-		int go = ig_strafe[c].on
-			? DotProduct(v, tdir) > 0.5f && IG_SafeCorridor(bs, v, 400)
+		go = ig_strafe[c].on
+			? (mode >= 2
+				? DotProduct(v, tdir) > 0 && (mr->traveltype & TRAVELTYPE_MASK) == TRAVEL_WALK &&
+				  !(mr->flags & (MOVERESULT_WAITING | MOVERESULT_ONTOPOFOBSTACLE)) && IG_SafeCorridor(bs, tdir, 300)
+				: DotProduct(v, tdir) > 0.5f && IG_SafeCorridor(bs, v, 400))
 			: (mr->traveltype & TRAVELTYPE_MASK) == TRAVEL_WALK &&
 			  !(mr->flags & (MOVERESULT_MOVEMENTVIEWSET | MOVERESULT_WAITING | MOVERESULT_ONTOPOFOBSTACLE)) &&
 			  speed >= IG_STRAFE_START && DotProduct(v, tdir) >= 0.7f && IG_SafeCorridor(bs, tdir, 500);
 		if (!go) {
-			if (ig_strafe[c].on) BotAI_Print(PRT_MESSAGE, "ig: strafe end %d ground hops %d speed %.0f\n", c, ig_strafe[c].hops, speed);
+			if (ig_strafe[c].on) BotAI_Print(PRT_MESSAGE, "ig: strafe end %d ground hops %d speed %.0f dot %.2f tdist %.0f travel %d flags %d safe %d\n", c, ig_strafe[c].hops, speed,
+				DotProduct(v, tdir), Distance2D(target, bs->origin), mr->traveltype & TRAVELTYPE_MASK, mr->flags, IG_SafeCorridor(bs, tdir, 300));
 			ig_strafe[c].on = 0;
 			return;
 		}
 		EA_Jump(c);
 		if (!ig_strafe[c].on) { BotAI_Print(PRT_MESSAGE, "ig: strafe %d start %.0f\n", c, speed); ig_strafe[c].hops = 0; }
 		else BotAI_Print(PRT_MESSAGE, "ig: strafe hop %d n %d speed %.0f\n", c, ++ig_strafe[c].hops, speed);
+		if (!ig_strafe[c].on) ig_strafe[c].stale = 0;
 		ig_strafe[c].on = 1;
+		if (!ig_strafe[c].stale) VectorCopy(tdir, ig_strafe[c].tdir);
 		ig_strafe[c].side = -ig_strafe[c].side;
 		if (!ig_strafe[c].side) ig_strafe[c].side = 1;
 		return;
 	}
 	if (!ig_strafe[c].on) return;
+	/* IG-31: at strafing speed the bot flies past the route's next point in
+	 * the air, and the route then points back at it. Billy keeps going and
+	 * picks the route up further on: a point behind or close by keeps the
+	 * last good direction until the landing asks again. */
+	if (mode >= 2 && speed >= 50) {
+		if (DotProduct(v, tdir) > -0.2f && Distance2D(target, bs->origin) >= 96)
+			VectorCopy(tdir, ig_strafe[c].tdir);
+		else if (VectorLengthSquared(ig_strafe[c].tdir) > 0.5f)
+			VectorCopy(ig_strafe[c].tdir, tdir);
+	}
+	if (mode >= 2 && speed >= 50 && DotProduct(v, tdir) > -0.2f) {
+		/* carve: strafe toward the side the route bends to, at the angle that
+		 * adds the most speed, or, when the route bends further than that,
+		 * at the route itself up to IG_STRAFE_CARVE off the velocity -- Billy
+		 * still gains up to 70 degrees off (route8 recording) */
+		cross = v[0] * tdir[1] - v[1] * tdir[0];
+		ig_strafe[c].side = cross >= 0 ? 1 : -1;
+		a = IG_STRAFE_WISH * IG_STRAFE_DT;
+		cosang = (IG_STRAFE_WISH - a) / (speed > IG_STRAFE_WISH ? speed : IG_STRAFE_WISH);
+		if (cosang > 1) cosang = 1;
+		if (cosang < 0) cosang = 0;
+		ang = acos(cosang);
+		{
+			float tang = acos(DotProduct(v, tdir) > 1 ? 1 : DotProduct(v, tdir));
+			if (tang > ang) ang = tang < IG_STRAFE_CARVE ? tang : IG_STRAFE_CARVE;
+		}
+		VectorSet(perp, -v[1], v[0], 0);
+		VectorScale(v, cos(ang), wish);
+		VectorMA(wish, ig_strafe[c].side * sin(ang), perp, wish);
+		EA_Move(c, wish, 400);
+		/* coming down: jump now, so it fires on the landing frame (Billy);
+		 * the game holds it (ig_botjumpland) */
+		if (bs->cur_ps.velocity[2] < 0) EA_Jump(c);
+		return;
+	}
 	if (speed < 50 || DotProduct(v, tdir) < 0.5f) {   /* the route turned */
-		BotAI_Print(PRT_MESSAGE, "ig: strafe end %d turned hops %d speed %.0f\n", c, ig_strafe[c].hops, speed);
+		BotAI_Print(PRT_MESSAGE, "ig: strafe end %d turned hops %d speed %.0f dot %.2f tdist %.0f vz %.0f tdz %.0f\n", c, ig_strafe[c].hops, speed,
+			DotProduct(v, tdir), Distance2D(target, bs->origin), bs->cur_ps.velocity[2], target[2] - bs->origin[2]);
 		ig_strafe[c].on = 0;
 		return;
 	}
