@@ -2880,6 +2880,7 @@ int BotFindEnemy(bot_state_t *bs, int curenemy) {
 	healthdecrease = bs->lasthealth > bs->inventory[INVENTORY_HEALTH];
 	//remember the current health value
 	bs->lasthealth = bs->inventory[INVENTORY_HEALTH];
+	if (IG_Peace()) return false; /* IG: no enemies at all (IG-27) */
 	{ int igr = IG_RevengeFindEnemy(bs, curenemy); if (igr >= 0) return igr; } /* IG: the nemesis first (IG-8) */
 	//
 	if (curenemy >= 0) {

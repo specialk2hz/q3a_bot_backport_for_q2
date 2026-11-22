@@ -6,6 +6,7 @@
 
 /* ai_ig_roam.c */
 void IG_RoamThink(bot_state_t *bs);
+int  IG_Peace(void);
 void IG_RoamReplace(bot_state_t *bs, int tfl);
 #define IG_SEEN     1
 #define IG_HEARD    2

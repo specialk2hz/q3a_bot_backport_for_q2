@@ -65,6 +65,13 @@ static int IG_RoamOn(void)
 	return trap_Cvar_VariableIntegerValue("ig_roam") != 0;
 }
 
+/* IG-27 ig_peace: bots pick no enemies (BotFindEnemy) and keep no traces to
+ * hunt, so they only move: for watching their movement and testing routes. */
+int IG_Peace(void)
+{
+	return trap_Cvar_VariableIntegerValue("ig_peace") != 0;
+}
+
 static float IG_HuntMemory(void)
 {
 	int m = trap_Cvar_VariableIntegerValue("ig_hunt_memory");
@@ -74,6 +81,7 @@ static float IG_HuntMemory(void)
 void IG_EvidenceKind(int bot, int enemy, const vec3_t pos, int kind)
 {
 	if (bot < 0 || bot >= MAX_CLIENTS || enemy < 0 || enemy >= MAX_CLIENTS) return;
+	if (IG_Peace()) return;
 	VectorCopy(pos, ig_traces[bot][enemy].pos);
 	ig_traces[bot][enemy].time = FloatTime();
 	ig_traces[bot][enemy].kind = kind;
