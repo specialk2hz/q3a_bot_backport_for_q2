@@ -1,28 +1,5 @@
 # Backport of the Quake III Arena Bot for Quake II
 
-## This fork: instagib grappling and movement
-
-This is [specialk2hz/q3a_bot_backport_for_q2](https://github.com/specialk2hz/q3a_bot_backport_for_q2), branch
-`instagib`, the bot brain of the [specialk2hz/colosseum](https://github.com/specialk2hz/colosseum) instagib fork.
-**Every change is behind a libvar that defaults to off, which is the original behaviour**; the game sets them
-from its `ig_*` cvars (see that repo's README and `IG-SPECS.md`). New code lives in `botlib/be_ig_hook.c` and
-`game_q3/ai_ig_*.c`; original files only get one-line hooks marked `/* IG: */`.
-
-What the bots learned, most of it modelled on recordings of a human player:
-
-- **The offhand grapple** (Quake II OSP hook): climb routes (`bspc -grapplereach`), with a watchdog against
-  hanging, a landing check, and a give-up when a hook stops making progress.
-- **Slingshots** (`ai_ig_sling.c`): jump, flick the view onto the floor (or a far wall) ahead, hook, let go
-  quickly, hop, chain round corners; hops off the floor while pulled; the stairwell variant; hook into a jump
-  pad and let go before it; a short pull toward the landing at the end of a pad's arc.
-- **Combat hooks**: mid-fight, and a reposition after a kill or two misses; the lava escape (nearly straight up).
-- **Hook affinity**: character trait 49 (`CHARACTERISTIC_IG_HOOK`); `bots/default_c.c` sets 9, meaning "work
-  it out from JUMPER and AGGRESSION". Grapple masters chain and hook a lot, runners mostly run.
-- **Purposeful roaming** (`ai_ig_roam.c`): with nothing to pick up, hunt the last place an enemy was seen or
-  heard, or take high ground, instead of a random area. Item goals are never touched.
-- **bspc**: `-q2aircontrol` (Quake II air control in jump arcs) and `-q2pads` (jump pads sunk into the floor
-  get their routes).
-
 ## About the Project
 
 The Gladiator Bot was an advanced bot for Quake II developed by Jan Paul "Mr. Elusive" van Waveren. While the Quake II game-side source code was released publicly, the source code of the bot library (`botlib`) was never released.
@@ -218,3 +195,26 @@ The core integration is working, but there is still room for improvement - bot p
 Feel free to fork this repository and to make pull requests. You can contact me at `niehztog (at) gmail.com`.
 
 January 29, 2023
+
+## Changes in this fork
+
+This is [specialk2hz/q3a_bot_backport_for_q2](https://github.com/specialk2hz/q3a_bot_backport_for_q2), branch
+`instagib`, the bot brain of the [specialk2hz/colosseum](https://github.com/specialk2hz/colosseum) instagib fork.
+**Every change is behind a libvar that defaults to off, which is the original behaviour**; the game sets them
+from its `ig_*` cvars (see that repo's README and `IG-SPECS.md`). New code lives in `botlib/be_ig_hook.c` and
+`game_q3/ai_ig_*.c`; original files only get one-line hooks marked `/* IG: */`.
+
+What the bots learned, much of it modelled on recordings of a human player:
+
+- **The offhand grapple** (Quake II OSP hook) on climb routes (`bspc -grapplereach`), with a watchdog against
+  hanging, a landing check, and a give-up when a hook stops making progress.
+- **Slingshots** (`ai_ig_sling.c`): jump, flick the view onto the floor or a far wall ahead, hook, let go
+  quickly, hop, chain round corners; hops off the floor while pulled; a stairwell variant; hook into a jump
+  pad and let go before it; a short pull toward the landing at the end of a pad's arc.
+- **Combat hooks**: mid-fight, a reposition after a kill or two misses, and a lava escape nearly straight up.
+- **Hook affinity**: character trait 49 (`CHARACTERISTIC_IG_HOOK`); `bots/default_c.c` sets 9, meaning "work
+  it out from JUMPER and AGGRESSION". Grapple masters chain and hook a lot, runners mostly run.
+- **Purposeful roaming** (`ai_ig_roam.c`): with nothing to pick up, hunt the last place an enemy was seen or
+  heard, or take high ground, instead of a random area. Item goals are never touched.
+- **bspc**: `-q2aircontrol` (Quake II air control in jump arcs) and `-q2pads` (routes for jump pads sunk
+  into the floor).
