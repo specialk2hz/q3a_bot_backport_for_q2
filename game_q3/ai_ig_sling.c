@@ -444,7 +444,7 @@ static int IG_FindStairAnchor(bot_state_t *bs, const vec3_t target, float topz, 
 /* IG-21: hook affinity, a character trait (CHARACTERISTIC_IG_HOOK, 49): 0 a
  * runner, 1 a grapple master (Billy: not every bot plays the same). Missing
  * from a character file it is default_c.c's 9: worked out from the bot's
- * jumping and aggression, which spreads the stock Q3 bots from Phobos (0.20)
+ * jumping and aggression, which spreads the stock Q3 bots from Phobos (0.38)
  * to Klesk (0.95). IG_HookScale is affinity / 0.55 -- 1 at 0.55, which is
  * how every bot behaved before -- and 1 with the switch (libvar ig_affinity)
  * off. It scales how often the bot chooses to hook, never whether a climb
@@ -460,7 +460,9 @@ static float IG_HookAffinity(bot_state_t *bs)
 		float j = trap_Characteristic_BFloat(bs->character, CHARACTERISTIC_JUMPER, 0, 1);
 		float ag = trap_Characteristic_BFloat(bs->character, CHARACTERISTIC_AGGRESSION, 0, 1);
 
-		a = 0.10f + 0.85f * (0.6f * j + 0.4f * ag);
+		/* floor 0.30 (Billy: fewer runners, more above average): stock bots
+		 * 4 runners, 6 average, 16 above, 9 masters */
+		a = 0.30f + 0.65f * (0.6f * j + 0.4f * ag);
 	}
 	if (a < 0.05f) a = 0.05f;
 	if (a > 1) a = 1;
