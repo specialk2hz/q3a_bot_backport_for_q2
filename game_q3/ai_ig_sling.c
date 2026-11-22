@@ -480,6 +480,7 @@ static float IG_Clamp(float v, float lo, float hi)
 	return v < lo ? lo : v > hi ? hi : v;
 }
 
+static void IG_HookMove(bot_state_t *bs, int infight);
 static void IG_SlingEnd(ig_sling_t *s)
 {
 	s->stairs = 0;
@@ -505,7 +506,14 @@ static void IG_SlingshotStep(bot_state_t *bs, bot_goal_t *goal, bot_moveresult_t
 		ig_fight[c].urge = 0;
 		if (ig_sling[c].state == IG_SLING_IDLE) ig_sling[c].cooldown = 0;
 	}
-	if (ig_fight[c].state != IG_FIGHT_NONE) return;   /* a combat hook still finishing */
+	/* a combat hook still finishing: only its own step lets go of it, and a
+	 * fight that ended (a kill, a death) left it to travelling, which waited
+	 * -- the bot hung until OSP's hook_holdtime, 7.5 s (repositions) */
+	if (ig_fight[c].state != IG_FIGHT_NONE) {
+		if (ig_fight[c].state == IG_FIGHT_HOOKED) IG_HookMove(bs, 0);
+		else ig_fight[c].state = IG_FIGHT_NONE;      /* aiming: drop it */
+		return;
+	}
 	if (!IG_SlingOn()) return;
 	s = &ig_sling[c];
 	if (s->state != IG_SLING_JUMPED && IG_Hop(bs)) return;

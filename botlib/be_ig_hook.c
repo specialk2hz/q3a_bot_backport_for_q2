@@ -152,6 +152,10 @@ int IG_GrappleState(const vec3_t origin, const vec3_t viewoffset, const vec3_t a
  *     rule ends a hook that is not getting there. */
 #define IG_HOLD_MAX  1.5f
 static float ig_hookout[MAX_CLIENTS];
+/* no-progress give-up: the best distance and when it last improved */
+static float ig_hookbest[MAX_CLIENTS], ig_hookbesttime[MAX_CLIENTS];
+#define IG_STUCK_TIME  0.6f
+#define IG_STUCK_GAIN  8
 
 /* The route a bot is hooking on, for the outcome check in the watchdog. */
 static int   ig_hookreach[MAX_CLIENTS];   /* reachability of the hook now out, 0: none */
@@ -171,15 +175,31 @@ float IG_GrappleDist(int client, int reachnum, const vec3_t origin, const vec3_t
 	ig_hookreach[client] = reachnum;
 	ig_hookseen[client] = AAS_Time();
 	/* BotTravel_Grapple sets lastgrappledist to 999999 when it fires */
-	if (last > 99999) ig_hookout[client] = AAS_Time();
+	if (last > 99999) {
+		ig_hookout[client] = AAS_Time();
+		ig_hookbest[client] = real;
+		ig_hookbesttime[client] = AAS_Time();
+	}
 	VectorCopy(origin, below);
 	below[2] -= 48;
 	if (AAS_PointAreaNum((vec_t *) origin) == reach->areanum || AAS_PointAreaNum(below) == reach->areanum)
 		return 0;
+	if (real < ig_hookbest[client] - IG_STUCK_GAIN) {
+		ig_hookbest[client] = real;
+		ig_hookbesttime[client] = AAS_Time();
+	}
 	if (AAS_Time() - ig_hookout[client] < IG_HOLD_MAX)
 	{
 		if (last > 99999) return real > 100 ? real : 100;
 		return last - 3 > 50 ? last - 3 : 50;
+	}
+	/* Past the hold and getting no closer: let go. Q3's own give-up waits for
+	 * the hook to go out of sight, which a bot hanging at a visible anchor
+	 * beside the ledge never does -- it hung until OSP's hook_holdtime (7.5 s;
+	 * Razor, q2rdm11). 0 twice is BotTravel_Grapple's "normal end". */
+	if (AAS_Time() - ig_hookbesttime[client] > IG_STUCK_TIME) {
+		botimport.Print(PRT_MESSAGE, "ig: grapple stuck %d, let go\n", client);
+		return 0;
 	}
 	return real;
 }
