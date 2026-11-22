@@ -22,7 +22,6 @@ What the bots learned, most of it modelled on recordings of a human player:
   heard, or take high ground, instead of a random area. Item goals are never touched.
 - **bspc**: `-q2aircontrol` (Quake II air control in jump arcs) and `-q2pads` (jump pads sunk into the floor
   get their routes).
-- **A bug fixed on the way**: `AngleDifference` was undeclared in the new code, so its aim checks read garbage.
 
 ## About the Project
 
