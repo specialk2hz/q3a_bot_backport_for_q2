@@ -497,6 +497,18 @@ static void IG_SlingshotStep(bot_state_t *bs, bot_goal_t *goal, bot_moveresult_t
 
 			if (trap_BotMovementViewTarget(bs->ms, goal, bs->tfl, 500, up) &&
 				up[2] - bs->origin[2] >= IG_STAIR_MIN_RISE && up[2] - bs->origin[2] <= IG_STAIR_MAX_RISE) {
+				/* not every time (Billy): a climb is hooked only sometimes
+				 * (libvar ig_stairchance, default 35%); otherwise the bot runs
+				 * up it, and does not ask again for a couple of seconds */
+				char buf[16];
+				float chance;
+
+				trap_Cvar_VariableStringBuffer("ig_stairchance", buf, sizeof(buf));
+				chance = buf[0] ? atof(buf) : 0.35f;
+				if (random() >= chance) {
+					s->cooldown = FloatTime() + 2.5f;
+					return;
+				}
 				s->stairs = 1;
 				s->topz = up[2];
 				VectorCopy(up, target);
