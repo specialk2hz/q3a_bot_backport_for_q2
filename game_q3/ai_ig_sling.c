@@ -81,6 +81,8 @@ typedef struct {
 	vec3_t latchpos;    /* where the bot was then */
 	float  remain;      /* eye to anchor then: the pull's length */
 	int    chain;       /* hooks in this sequence */
+	int    stairs;      /* IG-20: a stairwell hook, up to topz */
+	float  topz;
 } ig_sling_t;
 
 static ig_sling_t ig_sling[MAX_CLIENTS];
@@ -390,8 +392,57 @@ static int IG_InFront(bot_state_t *bs, const vec3_t p)
 	return DotProduct(d, v) > 0.5f;
 }
 
+/* IG-20, Billy's stairwell trick: going up stairs, hook the side wall (or the
+ * wall at the top) up ahead and slingshot up the stairwell. Upward anchors,
+ * 12-36 degrees up, straight on or up to 35 degrees to either side, 200-650
+ * units out, hit above the top of the climb (so the pull lifts the bot over
+ * it), with the body's path along the pull clear of the steps. */
+#define IG_STAIR_MIN_RISE  48
+#define IG_STAIR_MAX_RISE  320
+#define IG_STAIR_PULL      0.5f   /* seconds pulled at most */
+static int IG_StairsOn(void)
+{
+	return trap_Cvar_VariableIntegerValue("ig_stairhook");
+}
+
+static int IG_FindStairAnchor(bot_state_t *bs, const vec3_t target, float topz, vec3_t anchor)
+{
+	static const float pitches[] = { -20, -12, -28, -36 };
+	static const float yaws[] = { 0, 20, -20, 35, -35 };
+	vec3_t dir, end, mid, angles, flat;
+	vec3_t mins = {-16, -16, -24}, maxs = {16, 16, 32};
+	bsp_trace_t tr;
+	float d, baseyaw;
+	int i, k;
+
+	VectorSubtract(target, bs->origin, flat);
+	flat[2] = 0;
+	if (VectorNormalize(flat) < 64) return 0;
+	vectoangles(flat, angles);
+	baseyaw = angles[YAW];
+	for (k = 0; k < 5; k++) {
+		for (i = 0; i < 4; i++) {
+			VectorSet(angles, pitches[i], baseyaw + yaws[k], 0);
+			AngleVectors(angles, dir, NULL, NULL);
+			VectorMA(bs->eye, 650, dir, end);
+			if (!IG_AnchorTrace(bs, end, &tr)) continue;
+			d = tr.fraction * 650;
+			if (d < 200) continue;
+			if (tr.endpos[2] < topz + 24) continue;            /* above the top of the climb */
+			if (tr.plane.normal[2] < -0.3f) continue;          /* not a ceiling */
+			VectorMA(bs->origin, 0.6f * d, dir, mid);
+			BotAI_Trace(&tr, bs->origin, mins, maxs, mid, bs->entitynum, MASK_SOLID | IG_LIQUIDS);
+			if (tr.fraction < 1 || tr.startsolid) continue;     /* the steps in the way */
+			VectorMA(bs->eye, d, dir, anchor);
+			return 1;
+		}
+	}
+	return 0;
+}
+
 static void IG_SlingEnd(ig_sling_t *s)
 {
+	s->stairs = 0;
 	s->state = IG_SLING_IDLE;
 	s->cooldown = FloatTime() + IG_COOLDOWN;
 }
@@ -440,6 +491,17 @@ static void IG_SlingshotStep(bot_state_t *bs, bot_goal_t *goal, bot_moveresult_t
 			s->cooldown = FloatTime() + 0.5f;
 			return;
 		}
+		s->stairs = 0;
+		if (IG_StairsOn()) {
+			vec3_t up;
+
+			if (trap_BotMovementViewTarget(bs->ms, goal, bs->tfl, 500, up) &&
+				up[2] - bs->origin[2] >= IG_STAIR_MIN_RISE && up[2] - bs->origin[2] <= IG_STAIR_MAX_RISE) {
+				s->stairs = 1;
+				s->topz = up[2];
+				VectorCopy(up, target);
+			}
+		}
 		EA_Jump(c);
 		s->state = IG_SLING_JUMPED;
 		s->time = FloatTime();
@@ -449,8 +511,19 @@ static void IG_SlingshotStep(bot_state_t *bs, bot_goal_t *goal, bot_moveresult_t
 	case IG_SLING_JUMPED:
 		/* near the top of the jump, from up there, pick the anchor */
 		if (FloatTime() - s->time < IG_JUMP_AIM) return;
-		if (!IG_RouteAhead(bs, goal, target)) { IG_SlingEnd(s); return; }
-		if (!IG_FindAnchor(bs, target, s->anchor)) {
+		if (s->stairs) {
+			vec3_t up;
+
+			if (!trap_BotMovementViewTarget(bs->ms, goal, bs->tfl, 500, up) ||
+				!IG_FindStairAnchor(bs, up, s->topz, s->anchor)) {
+				s->stairs = 0;
+				IG_SlingEnd(s);
+				return;
+			}
+			BotAI_Print(PRT_MESSAGE, "ig: stairhook %d rise %.0f\n", c, s->topz - bs->origin[2]);
+		}
+		else if (!IG_RouteAhead(bs, goal, target)) { IG_SlingEnd(s); return; }
+		else if (!IG_FindAnchor(bs, target, s->anchor)) {
 			if (s->chain) BotAI_Print(PRT_MESSAGE, "ig: chain end %d noanchor\n", c);
 			IG_SlingEnd(s);
 			return;
@@ -550,6 +623,9 @@ static void IG_SlingshotStep(bot_state_t *bs, bot_goal_t *goal, bot_moveresult_t
 		dist = VectorLength(d);
 		{
 			const char *why = !s->latched ? "nolatch" :
+				s->stairs ? (bs->origin[2] >= s->topz - 8 ? "top" :
+							 FloatTime() - s->latched > IG_STAIR_PULL ? "time" :
+							 (FloatTime() - s->latched > 0.15f && speed < IG_STALL_SPEED) ? "stall" : NULL) :
 				dist > IG_RELEASE_FRAC * s->remain ? "far" :
 				(speed > IG_RELEASE_SPEED && FloatTime() - s->latched >= 0.08f) ? "fast" :   /* at full speed, keep it */
 				FloatTime() - s->latched > IG_HOOK_MAX ? "time" :
@@ -557,6 +633,8 @@ static void IG_SlingshotStep(bot_state_t *bs, bot_goal_t *goal, bot_moveresult_t
 				!IG_HookNear(s->anchor, 48, hookpos) ? "lost" : NULL;
 			if (!why) return;
 			trap_EA_Command(c, LibVarGetString("cmd_grappleoff"));
+			if (s->stairs) BotAI_Print(PRT_MESSAGE, "ig: stairhook release %d why %s left %.0f\n", c, why, s->topz - bs->origin[2]);
+			s->stairs = 0;
 			{
 				/* where the hook is, if it is out at all: for telling a miss from a refusal */
 				int st = IG_HookNear(s->anchor, 4000, hookpos);
