@@ -278,6 +278,35 @@ static int IG_SafeCorridor(bot_state_t *bs, const vec3_t flat, float length)
 	return 1;
 }
 
+/* IG-29 (libvar ig_walkway): the corridor also stays on the walkway. The
+ * slingshot aims at the route a few hundred units on, in a straight line;
+ * on a walkway that bends over lava (q2rdm11) that line cuts the corner off
+ * the edge, over lower floor or lava. Here the floor along the line may not
+ * fall more than IG_WALKWAY_DROP below the lower of the bot's feet and the
+ * route point it aims at, so a route that goes down still may. */
+#define IG_WALKWAY_DROP 48
+static int IG_WalkwayCorridor(bot_state_t *bs, const vec3_t flat, float length, const vec3_t target)
+{
+	vec3_t p, down;
+	bsp_trace_t tr;
+	float t, minz;
+
+	if (!IG_SafeCorridor(bs, flat, length)) return 0;
+	if (!trap_Cvar_VariableIntegerValue("ig_walkway")) return 1;
+	minz = bs->origin[2] - 24;                          /* the feet */
+	if (target && target[2] - 24 < minz) minz = target[2] - 24;
+	minz -= IG_WALKWAY_DROP;
+	for (t = IG_CORRIDOR_STEP; t <= length; t += IG_CORRIDOR_STEP) {
+		VectorMA(bs->origin, t, flat, p);
+		VectorCopy(p, down);
+		down[2] -= 700;
+		BotAI_Trace(&tr, p, NULL, NULL, down, bs->entitynum, MASK_SOLID | IG_LIQUIDS);
+		if (tr.startsolid) continue;                    /* a step up: still on it */
+		if (tr.endpos[2] < minz) return 0;
+	}
+	return 1;
+}
+
 int IG_LavaEscape(bot_state_t *bs);
 
 /* Where the route goes: a point IG_LOOKAHEAD along it, if it runs far
@@ -535,12 +564,17 @@ static void IG_SlingshotStep(bot_state_t *bs, bot_goal_t *goal, bot_moveresult_t
 		/* the jump comes before the anchor, so the way ahead is checked first:
 		 * a jump on a walkway beside lava was a jump into it (q2rdm11: lava
 		 * deaths 58 -> 157 when the slingshot became jump-first) */
-		if (!IG_SafeCorridor(bs, d, 500)) {
+		if (!IG_WalkwayCorridor(bs, d, 500, target)) {
 			s->cooldown = FloatTime() + 0.5f;
 			return;
 		}
 		/* how keen this bot is (IG-21): a runner passes on some, a master on none */
-		if (random() > IG_Clamp(1 + (IG_HookScale(bs) - 1) * 0.77f, 0.4f, 1)) {
+		/* IG-28 (libvar ig_affinitychance): the affinity IS the chance, so
+		 * every bot above 0.55 no longer takes them all */
+		if (random() > (trap_Cvar_VariableIntegerValue("ig_affinity") &&
+						trap_Cvar_VariableIntegerValue("ig_affinitychance")
+						? IG_HookAffinity(bs)
+						: IG_Clamp(1 + (IG_HookScale(bs) - 1) * 0.77f, 0.4f, 1))) {
 			s->cooldown = FloatTime() + IG_COOLDOWN * IG_Clamp(2 - IG_HookScale(bs), 0.6f, 2);
 			return;
 		}
@@ -735,7 +769,7 @@ static void IG_SlingshotStep(bot_state_t *bs, bot_goal_t *goal, bot_moveresult_t
 			VectorSubtract(target, bs->origin, d);
 			d[2] = 0;
 			VectorNormalize(d);
-			if (!IG_SafeCorridor(bs, d, 350)) {
+			if (!IG_WalkwayCorridor(bs, d, 350, target)) {
 				BotAI_Print(PRT_MESSAGE, "ig: chain end %d unsafe\n", c);
 				IG_SlingEnd(s);
 				return;
