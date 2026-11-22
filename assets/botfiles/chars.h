@@ -123,4 +123,7 @@
 #define CHARACTERISTIC_ALERTNESS					46	//float [0, 1]
 //how long the bot fires it's weapon (continuous or bursts)
 #define CHARACTERISTIC_FIRETHROTTLE					47	//float [0, 1]
+//IG-21: how much the bot likes the grapple: 0 a runner, 1 a grapple master;
+//above 1 (default_c.c: 9): worked out from JUMPER and AGGRESSION (game_q3/ai_ig_sling.c)
+#define CHARACTERISTIC_IG_HOOK						49	//float [0, 1]
 

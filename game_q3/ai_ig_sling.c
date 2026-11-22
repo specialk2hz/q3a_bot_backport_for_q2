@@ -38,6 +38,7 @@ of the License, or (at your option) any later version.
 #include "ai_main.h"
 #include "ai_dmq3.h"
 #include "ai_ig.h"
+#include "chars.h"
 
 /* botlib/be_ig_hook.c */
 void IG_GrappleTravelNote(int client);
@@ -440,6 +441,43 @@ static int IG_FindStairAnchor(bot_state_t *bs, const vec3_t target, float topz, 
 	return 0;
 }
 
+/* IG-21: hook affinity, a character trait (CHARACTERISTIC_IG_HOOK, 49): 0 a
+ * runner, 1 a grapple master (Billy: not every bot plays the same). Missing
+ * from a character file it is default_c.c's 9: worked out from the bot's
+ * jumping and aggression, which spreads the stock Q3 bots from Phobos (0.20)
+ * to Klesk (0.95). IG_HookScale is affinity / 0.55 -- 1 at 0.55, which is
+ * how every bot behaved before -- and 1 with the switch (libvar ig_affinity)
+ * off. It scales how often the bot chooses to hook, never whether a climb
+ * route or the lava escape uses the hook. */
+#define CHARACTERISTIC_IG_HOOK  49
+#define IG_AFFINITY_MID         0.55f
+float Characteristic_Float(int character, int index);
+static float IG_HookAffinity(bot_state_t *bs)
+{
+	float a = Characteristic_Float(bs->character, CHARACTERISTIC_IG_HOOK);
+
+	if (a > 1.5f) {     /* default_c.c's 9: not set (the parser takes no negatives) */
+		float j = trap_Characteristic_BFloat(bs->character, CHARACTERISTIC_JUMPER, 0, 1);
+		float ag = trap_Characteristic_BFloat(bs->character, CHARACTERISTIC_AGGRESSION, 0, 1);
+
+		a = 0.10f + 0.85f * (0.6f * j + 0.4f * ag);
+	}
+	if (a < 0.05f) a = 0.05f;
+	if (a > 1) a = 1;
+	return a;
+}
+
+static float IG_HookScale(bot_state_t *bs)
+{
+	if (!trap_Cvar_VariableIntegerValue("ig_affinity")) return 1;
+	return IG_HookAffinity(bs) / IG_AFFINITY_MID;
+}
+
+static float IG_Clamp(float v, float lo, float hi)
+{
+	return v < lo ? lo : v > hi ? hi : v;
+}
+
 static void IG_SlingEnd(ig_sling_t *s)
 {
 	s->stairs = 0;
@@ -491,6 +529,11 @@ static void IG_SlingshotStep(bot_state_t *bs, bot_goal_t *goal, bot_moveresult_t
 			s->cooldown = FloatTime() + 0.5f;
 			return;
 		}
+		/* how keen this bot is (IG-21): a runner passes on some, a master on none */
+		if (random() > IG_Clamp(1 + (IG_HookScale(bs) - 1) * 0.77f, 0.4f, 1)) {
+			s->cooldown = FloatTime() + IG_COOLDOWN * IG_Clamp(2 - IG_HookScale(bs), 0.6f, 2);
+			return;
+		}
 		s->stairs = 0;
 		if (IG_StairsOn()) {
 			vec3_t up;
@@ -504,7 +547,7 @@ static void IG_SlingshotStep(bot_state_t *bs, bot_goal_t *goal, bot_moveresult_t
 				float chance;
 
 				trap_Cvar_VariableStringBuffer("ig_stairchance", buf, sizeof(buf));
-				chance = buf[0] ? atof(buf) : 0.35f;
+				chance = (buf[0] ? atof(buf) : 0.35f) * IG_HookScale(bs);
 				if (random() >= chance) {
 					s->cooldown = FloatTime() + 2.5f;
 					return;
@@ -656,7 +699,7 @@ static void IG_SlingshotStep(bot_state_t *bs, bot_goal_t *goal, bot_moveresult_t
 			}
 			if (s->latched) IG_HopStart(c);
 			/* chain, or let it end */
-			if (s->latched && random() < IG_CHAIN_CHANCE) {
+			if (s->latched && random() < IG_Clamp(IG_CHAIN_CHANCE + (IG_HookScale(bs) - 1) * 0.5f, 0.4f, 0.98f)) {
 				s->state = IG_SLING_AFTER;
 				s->time = FloatTime();
 			}
@@ -781,13 +824,13 @@ static void IG_HookMove(bot_state_t *bs, int infight)
 		f->lastkill = bs->killedenemy_time;
 		f->shot = 0;
 		f->misses = 0;
-		if (random() < IG_REPO_AFTER_KILL) f->urge = 1;
+		if (random() < IG_REPO_AFTER_KILL * IG_HookScale(bs)) f->urge = 1;
 	}
 	else if (f->shot > 0 && FloatTime() - f->shot > IG_HIT_WINDOW) {
 		f->shot = 0;
 		if (++f->misses >= IG_REPO_MISSES) {
 			f->misses = 0;
-			f->urge = 1;
+			if (random() < IG_HookScale(bs)) f->urge = 1;
 		}
 	}
 	if (ig_sling[c].state != IG_SLING_IDLE && ig_sling[c].state != IG_SLING_AFTER) return;   /* a slingshot is on */
@@ -811,7 +854,7 @@ static void IG_HookMove(bot_state_t *bs, int infight)
 			dist = VectorLength(d);
 			if (dist < 250 || dist > 1800) return;
 			BotEntityInfo(bs->client, &self);
-			if (random() > (EntityIsShooting(&self) ? IG_FIGHT_CHANCE : IG_FIGHT_IDLE)) return;
+			if (random() > (EntityIsShooting(&self) ? IG_FIGHT_CHANCE : IG_FIGHT_IDLE) * IG_HookScale(bs)) return;
 			if (!IG_FightAnchor(bs, f->anchor, 0)) {
 				f->cooldown = FloatTime() + 0.5f;
 				return;
@@ -1173,6 +1216,7 @@ static int IG_PadHook(bot_state_t *bs)
 		if (ig_sling[c].state != IG_SLING_IDLE && ig_sling[c].state != IG_SLING_AFTER) return 0;
 		if (ig_fight[c].state != IG_FIGHT_NONE) return 0;
 		if (!IG_PadAnchor(bs, land, ig_pad[c].anchor)) return 0;
+		if (random() > IG_HookScale(bs)) { ig_pad[c].state = IG_PAD_DONE; return 0; }     /* IG-21: this flight, no */
 		VectorCopy(land, ig_pad[c].land);
 		ig_pad[c].state = IG_PAD_AIMING;
 		ig_pad[c].time = FloatTime();
@@ -1262,6 +1306,7 @@ static int IG_PadApproach(bot_state_t *bs, bot_goal_t *goal, bot_moveresult_t *m
 		dist = VectorNormalize(d);
 		if (dist < IG_PADIN_MIN || dist > IG_PADIN_MAX) return 0;
 		if (!IG_SafeCorridor(bs, d, dist)) { ig_padin[c].cooldown = FloatTime() + 1; return 0; }
+		if (random() > IG_HookScale(bs)) { ig_padin[c].cooldown = FloatTime() + 3; return 0; }     /* IG-21 */
 		VectorCopy(pad, ig_padin[c].pad);
 		EA_Jump(c);
 		ig_padin[c].state = IG_PADIN_JUMPED;
