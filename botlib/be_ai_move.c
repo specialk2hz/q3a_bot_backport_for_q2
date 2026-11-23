@@ -117,6 +117,7 @@ libvar_t *cmd_grappleoff;
 libvar_t *cmd_grappleon;
 //type of model, func_plat or func_bobbing
 int modeltypes[MAX_MODELS];
+static char ig_modelwall[MAX_MODELS];	/* IG: func_wall models (ig_funcwall) */
 //Q2: func_plat2 used by a button or a trigger (it has a targetname)
 int modeltargeted[MAX_MODELS];
 //Q2: origin of a func_plat2 in its top position
@@ -528,6 +529,7 @@ void BotSetBrushModelTypes(void)
 
 	Com_Memset(modeltypes, 0, MAX_MODELS * sizeof(int));
 	Com_Memset(modeltargeted, 0, MAX_MODELS * sizeof(int));
+	Com_Memset(ig_modelwall, 0, sizeof(ig_modelwall));
 	//Q2: the func_train paths (AAS_InitTrainPaths, be_aas_reach.c)
 	AAS_InitTrainPaths();
 	Com_Memset(trainpostime, 0, sizeof(trainpostime));
@@ -562,6 +564,9 @@ void BotSetBrushModelTypes(void)
 			modeltypes[modelnum] = MODELTYPE_FUNC_DOOR;
 		else if (!Q_stricmp(classname, "func_static"))
 			modeltypes[modelnum] = MODELTYPE_FUNC_STATIC;
+		/* IG: noted for ig_funcwall, whatever its setting (read per move) */
+		else if (!Q_stricmp(classname, "func_wall"))
+			ig_modelwall[modelnum] = 1;
 	} //end for
 } //end of the function BotSetBrushModelTypes
 //===========================================================================
@@ -3502,6 +3507,13 @@ void BotMoveToGoal(bot_moveresult_t *result, int movestate, bot_goal_t *goal, in
 			if (modelnum >= 0 && modelnum < MAX_MODELS)
 			{
 				modeltype = modeltypes[modelnum];
+				/* IG: ig_funcwall 1 -- a func_wall stood on is the map, like a
+				 * func_static. Q2 maps build fixed scenery from func_wall (q2rdm11's
+				 * item pads: 66x66 plates 6 units high); Q3 knew no func_wall, called
+				 * the bot "on top of an obstacle", and BotAIBlocked walked it about at
+				 * random: bots circled every pad they stepped on. */
+				if (!modeltype && ig_modelwall[modelnum] && LibVarValue("ig_funcwall", "0"))
+					modeltype = MODELTYPE_FUNC_STATIC;
 
 				if (modeltype == MODELTYPE_FUNC_PLAT || modeltype == MODELTYPE_FUNC_PLAT2)
 				{

@@ -536,6 +536,9 @@ static void IG_FindHighGround(void)
 	}
 	free(floors); free(sorted); free(cand);
 	botimport.Print(PRT_MESSAGE, "ig: %d high ground points (floor above %.0f)\n", ig_hgcount, cut);
+	for (i = 0; i < ig_hgcount; i++)
+		botimport.Print(PRT_MESSAGE, "ig: high ground point %d at %.0f %.0f %.0f area %d\n", i,
+						ig_hgpoint[i][0], ig_hgpoint[i][1], ig_hgpoint[i][2], ig_hgarea[i]);
 }
 
 int IG_HighGround(int max, int *areas, vec3_t *points)

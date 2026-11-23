@@ -8,6 +8,7 @@
 void IG_RoamThink(bot_state_t *bs);
 int  IG_Peace(void);
 void IG_RoamReplace(bot_state_t *bs, int tfl);
+void IG_MoveDebug(bot_state_t *bs, bot_goal_t *goal, bot_moveresult_t *mr);
 #define IG_SEEN     1
 #define IG_HEARD    2
 #define IG_KILLEDBY 3

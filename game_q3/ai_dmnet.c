@@ -1910,6 +1910,7 @@ int AINode_Seek_LTG(bot_state_t *bs)
 	BotSetupForMovement(bs);
 	//move towards the goal
 	trap_BotMoveToGoal(&moveresult, bs->ms, &goal, bs->tfl);
+	IG_MoveDebug(bs, &goal, &moveresult); /* IG: ig_movedebug 1 logs the move (diagnostic) */
 	//if the movement failed
 	if (moveresult.failure) {
 		//reset the avoid reach, otherwise bot is stuck in current area
