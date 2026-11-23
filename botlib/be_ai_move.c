@@ -3015,6 +3015,7 @@ bot_moveresult_t BotTravel_Grapple(bot_movestate_t *ms, aas_reachability_t *reac
 		if (IG_HookDetect()) dist = IG_GrappleDist(ms->client, ms->lastreachnum, ms->origin, ms->viewoffset, reach, ms->lastgrappledist); /* IG: IG-6 */
 		//if very close to the grapple end or the grappled is hooked and
 		//the bot doesn't get any closer
+		if (IG_HookDetect() && state == 2 && IG_ClimbLetGo(ms->origin, reach)) { dist = 0; ms->lastgrappledist = 0; botimport.Print(PRT_MESSAGE, "ig: climb letgo %d\n", ms->client); } /* IG: IG-32 */
 		if (state && dist < 48)
 		{
 			if (ms->lastgrappledist - dist < 1)
@@ -3078,9 +3079,10 @@ bot_moveresult_t BotTravel_Grapple(bot_movestate_t *ms, aas_reachability_t *reac
 		Vector2Angles(viewdir, result.ideal_viewangles);
 		result.flags |= MOVERESULT_MOVEMENTVIEW;
 		//
-		if (dist < 5 &&
+		if ((dist < 5 &&
 			fabs(AngleDiff(result.ideal_viewangles[0], ms->viewangles[0])) < 2 &&
-			fabs(AngleDiff(result.ideal_viewangles[1], ms->viewangles[1])) < 2)
+			fabs(AngleDiff(result.ideal_viewangles[1], ms->viewangles[1])) < 2) ||
+			(IG_HookDetect() && IG_ClimbFireNow(ms->origin, ms->viewoffset, ms->viewangles, reach->start, viewdir, ms->entitynum))) /* IG: IG-32 */
 		{
 #ifdef DEBUG_GRAPPLE
 			botimport.Print(PRT_MESSAGE, "BotTravel_Grapple: activating grapple\n");
@@ -3100,6 +3102,7 @@ bot_moveresult_t BotTravel_Grapple(bot_movestate_t *ms, aas_reachability_t *reac
 			{
 				EA_Command(ms->client, cmd_grappleon->string);
 				IG_NoteHookFire(ms->client); /* IG: one hook clock (IG-9) */
+				if (IG_HookDetect()) botimport.Print(PRT_MESSAGE, "ig: climb fire %d reach %d\n", ms->client, ms->lastreachnum); /* IG: IG-32 */
 			} //end if
 			else
 			{
@@ -3112,6 +3115,7 @@ bot_moveresult_t BotTravel_Grapple(bot_movestate_t *ms, aas_reachability_t *reac
 		{
 			if (dist < 70) speed = 300 - (300 - 4 * dist);
 			else speed = 400;
+			if (IG_HookDetect() && (IG_ClimbRun() & 1)) speed = 400; /* IG: IG-32, run in */
 			//
 			BotCheckBlocked(ms, dir, true, &result);
 			//elemantary action move in direction

@@ -315,6 +315,68 @@ float IG_GrappleStartDist(float dist)
 	return dist < IG_START_MINDIST ? IG_START_MINDIST : dist;
 }
 
+/* IG-32: climbs on the run (libvar ig_climbrun, default 0). Billy fires a
+ * climb running (~300 u/s); a bot walked to the route's start, stopped, and
+ * stood until its aim was inside 2 degrees -- 60% of its climbs left from a
+ * standstill. With this, near the start (IG_RUN_FIRE) it keeps running and
+ * fires once its view is within IG_RUN_AIM degrees of the aim (the hook's
+ * path is traced before it fires); and it lets go as soon as its feet are over the landing's
+ * height and it is near the landing, so the momentum carries it over the
+ * lip instead of riding the pull to the anchor and hanging there. */
+#define IG_RUN_FIRE  40
+#define IG_RUN_AIM   6    /* degrees, at most */
+#define IG_RUN_MISS  16   /* units off the aim point the hook may land */
+#define IG_RUN_LAND  48   /* from the landing area, horizontally */
+#define IG_RUN_CLEAR 0.8f /* of the way to the anchor the body must clear */
+/* bit 1: fire on the run; bit 2: let go over the landing. 3 = both */
+int IG_ClimbRun(void)
+{
+	return (int) LibVarValue("ig_climbrun", "0");
+}
+
+int IG_ClimbFireNow(const vec3_t origin, const vec3_t viewoffset, const vec3_t viewangles, const vec3_t start, const vec3_t aimdir, int passent)
+{
+	vec3_t d, ideal, eye, end;
+	aas_trace_t trace;
+	float len, tol;
+
+	if (!(IG_ClimbRun() & 1)) return 0;
+	VectorSubtract(start, origin, d);
+	d[2] = 0;
+	if (VectorLength(d) > IG_RUN_FIRE) return 0;
+	/* the hook must land within IG_RUN_MISS of the aim point, or the pull
+	 * takes another line: about 3 degrees at a usual 300 units */
+	len = VectorLength(aimdir);
+	if (len < 1) return 0;
+	tol = RAD2DEG(atan(IG_RUN_MISS / len));
+	if (tol < 2) tol = 2;
+	if (tol > IG_RUN_AIM) tol = IG_RUN_AIM;
+	vectoangles(aimdir, ideal);
+	if (fabs(AngleMod(ideal[0] - viewangles[0] + 180) - 180) >= tol ||
+		fabs(AngleMod(ideal[1] - viewangles[1] + 180) - 180) >= tol) return 0;
+	/* from here, not bspc's start, the pull carries the body along a lower
+	 * line: only if the body clears it (to IG_RUN_CLEAR of the way) */
+	VectorAdd(origin, viewoffset, eye);
+	VectorMA(origin, IG_RUN_CLEAR, aimdir, end);
+	trace = AAS_TraceClientBBox((vec_t *) origin, end, PRESENCE_NORMAL, passent);
+	return trace.fraction >= 1;
+}
+
+int IG_ClimbLetGo(const vec3_t origin, const struct aas_reachability_s *reach)
+{
+	vec3_t d;
+	aas_area_t *area;
+	int i;
+
+	if (!(IG_ClimbRun() & 2) || reach->areanum <= 0 || reach->areanum >= aasworld.numareas) return 0;
+	area = &aasworld.areas[reach->areanum];
+	/* the area is in origin space: over its bottom, the feet clear its floor */
+	if (origin[2] < area->mins[2] + 8) return 0;
+	for (i = 0; i < 2; i++)
+		d[i] = origin[i] < area->mins[i] ? area->mins[i] - origin[i] : origin[i] > area->maxs[i] ? origin[i] - area->maxs[i] : 0;
+	return d[0] * d[0] + d[1] * d[1] <= IG_RUN_LAND * IG_RUN_LAND;
+}
+
 /* A grapple route whose hook path is blocked. BotTravel_Grapple traces the
  * line to the anchor before firing and reports a movement failure when it is
  * not clear -- and the decision code answers a failure by clearing the
