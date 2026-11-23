@@ -55,6 +55,7 @@ void AAS_RemoveRoutingCacheUsingArea(int areanum);    /* be_aas_route.c */
 #define Q2_SOLID_NOT        0
 #define Q2_SOLID_BBOX       2
 #define Q2_HOOK_MODEL       "models/weapons/grapple/hook/tris.md2"
+#define Q2_LMCTF_HOOK_MODEL "models/objects/ghook/tris.md2"   /* hook_type lmctf (IG-34) */
 
 /* How far a hook may lie from the line between the bot's eye and the anchor
  * and still be taken for the bot's own. A hook in flight is on that line by
@@ -68,16 +69,11 @@ int IG_HookDetect(void)
 	return LibVarGetValue("ig_hookdetect") != 0;
 }
 
-/* The adapter's model table lookup for the Threewave hook, cached per map. */
-static int IG_HookModelIndex(char **names, int count)
+/* Is this model index a hook's model: Threewave's, or LMCTF's (IG-34)? */
+static int IG_HookModel(int modelindex, char **names, int count)
 {
-	int i;
-
-	for (i = 1; names && i < count; i++)
-	{
-		if (names[i] && !Q_stricmp(names[i], Q2_HOOK_MODEL)) return i;
-	}
-	return -1;
+	if (!names || modelindex <= 0 || modelindex >= count || !names[modelindex]) return false;
+	return !Q_stricmp(names[modelindex], Q2_HOOK_MODEL) || !Q_stricmp(names[modelindex], Q2_LMCTF_HOOK_MODEL);
 }
 
 int IG_IsHookEntity(int solid, int renderfx, int modelindex, char **names, int count)
@@ -89,8 +85,8 @@ int IG_IsHookEntity(int solid, int renderfx, int modelindex, char **names, int c
 	 * that lies on the bot's own line to its anchor, which a map's laser
 	 * practically never does. */
 	if ((renderfx & Q2_RF_BEAM) && (solid == Q2_SOLID_BBOX || solid == Q2_SOLID_NOT)) return true;
-	/* Threewave's cable hook: its own model */
-	return modelindex > 0 && modelindex == IG_HookModelIndex(names, count);
+	/* Threewave's cable hook, LMCTF's: their own models */
+	return IG_HookModel(modelindex, names, count);
 }
 
 /* Distance from p to the segment a-b. */
@@ -236,6 +232,14 @@ void IG_GrappleAim(const vec3_t eye, const vec3_t anchor, float lift, int passen
 #define IG_HOOK_ORPHAN  0.3f
 static float ig_grapplenote[MAX_CLIENTS];
 
+/* IG-34: > 1 for a hook slower than OSP's 1650 u/s (the game passes the live
+ * hook's speed in ig_hookfly): it is out longer before it bites. */
+float IG_HookFlyScale(void)
+{
+	float v = LibVarValue("ig_hookfly", "0");
+	return v > 100 ? 1650.0f / v : 1;
+}
+
 void IG_GrappleTravelNote(int client)
 {
 	if (client >= 0 && client < MAX_CLIENTS) ig_grapplenote[client] = AAS_Time();
@@ -292,7 +296,7 @@ void IG_GrappleWatchdog(int client)
 	if (ig_grapplenote[client] <= 0) return;
 	/* a new map restarts the clock */
 	if (AAS_Time() < ig_grapplenote[client]) { ig_grapplenote[client] = 0; return; }
-	if (AAS_Time() - ig_grapplenote[client] < IG_HOOK_ORPHAN) return;
+	if (AAS_Time() - ig_grapplenote[client] < IG_HOOK_ORPHAN * IG_HookFlyScale()) return;   /* IG-34 */
 	EA_Command(client, LibVarGetString("cmd_grappleoff"));
 	ig_grapplenote[client] = 0;
 }

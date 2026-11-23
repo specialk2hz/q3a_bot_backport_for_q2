@@ -94,6 +94,26 @@ static ig_sling_t ig_sling[MAX_CLIENTS];
  * IG_HOP_TIME after a let-go, a bot that lands still faster than
  * IG_HOP_SPEED, with safe floor ahead the way it is moving, jumps at once --
  * up to IG_HOP_MAX times. */
+/* IG-34: the times and speeds above were tuned on OSP's hook as this server
+ * sets it (hook_speed 1650, hook_pullspeed 975). The game passes the live
+ * hook's speeds (ig_hookfly, ig_hookpull); these scale a constant to them, so
+ * on OSP's hook every value is what it was. */
+#define IG_OSP_FLY   1650.0f
+#define IG_OSP_PULL  975.0f
+static float IG_HookFlyScale(void)      /* > 1: a slower hook flies longer */
+{
+	float v = trap_Cvar_VariableIntegerValue("ig_hookfly");
+	return v > 100 ? IG_OSP_FLY / v : 1;
+}
+static float IG_HookPullScale(void)     /* < 1: a slower pull */
+{
+	float v = trap_Cvar_VariableIntegerValue("ig_hookpull");
+	return v > 100 ? v / IG_OSP_PULL : 1;
+}
+#define IG_FLY_TIME(t)   ((t) * IG_HookFlyScale())     /* seconds of flight */
+#define IG_PULL_TIME(t)  ((t) / IG_HookPullScale())    /* seconds of pull: the same distance */
+#define IG_PULL_SPEED(v) ((v) * IG_HookPullScale())    /* a speed the pull reaches */
+
 #define IG_HOP_TIME   1.5f
 #define IG_HOP_SPEED  350
 #define IG_HOP_MAX    2      /* Billy: about two jumps, then stop or sling again */
@@ -366,6 +386,21 @@ static int IG_RouteNear(bot_state_t *bs, bot_goal_t *goal, vec3_t target)
 	return DotProduct(d, v) > 0.5f;
 }
 
+/* IG-34: the slingshot's anchor pitches, scaled. OSP's pull has no gravity
+ * and Billy hooks the floor ahead (6-18 degrees down); LMCTF's pull carries
+ * gravity, and hooking the same angles UP (ig_slingup 100, which the game
+ * sets for hook_type lmctf) took climbs from 25% to 35% of hooks with speed
+ * unchanged. ig_slingpitch (percent) scales the downward set, for testing.
+ * Libvars take no minus sign, hence two. */
+static float IG_SlingPitchScale(void)
+{
+	/* libvars parse no minus sign (LibVarStringValue): ig_slingup = upward */
+	int v = trap_Cvar_VariableIntegerValue("ig_slingpitch");
+	int up = trap_Cvar_VariableIntegerValue("ig_slingup");
+	if (up) return -up / 100.0f;
+	return v ? v / 100.0f : 1;
+}
+
 /* An anchor ahead toward `target`, from where the bot is now. */
 static int IG_FindAnchorYaw(bot_state_t *bs, float baseyaw, vec3_t anchor)
 {
@@ -385,7 +420,7 @@ static int IG_FindAnchorYaw(bot_state_t *bs, float baseyaw, vec3_t anchor)
 
 	for (k = 0; k < 5; k++) {
 		for (i = 0; i < 5; i++) {
-			VectorSet(angles, pitches[i], baseyaw + yaws[k], 0);
+			VectorSet(angles, pitches[i] * IG_SlingPitchScale(), baseyaw + yaws[k], 0);   /* IG-34 */
 			AngleVectors(angles, dir, NULL, NULL);
 			VectorSet(flat, dir[0], dir[1], 0);
 			VectorNormalize(flat);
@@ -727,7 +762,7 @@ static void IG_SlingshotStep(bot_state_t *bs, bot_goal_t *goal, bot_moveresult_t
 			 * reaches. A shallow floor hook catches 100-300+ units off the
 			 * aimed spot, where the brain did not see it: 18% of slingshots
 			 * caught in the game were let go as misses. */
-			if (!st && speed > 800) {
+			if (!st && speed > IG_PULL_SPEED(800)) {   /* IG-34 */
 				VectorSubtract(s->anchor, bs->eye, to);
 				VectorCopy(bs->cur_ps.velocity, vdir);
 				to[2] = vdir[2] = 0;
@@ -743,19 +778,19 @@ static void IG_SlingshotStep(bot_state_t *bs, bot_goal_t *goal, bot_moveresult_t
 				VectorSubtract(s->anchor, bs->eye, d);
 				s->remain = VectorLength(d);
 			}
-			else if (FloatTime() - s->time < IG_FLY_MAX) return;
+			else if (FloatTime() - s->time < IG_FLY_TIME(IG_FLY_MAX)) return;
 		}
 		VectorSubtract(bs->origin, s->latched ? s->latchpos : bs->origin, d);
 		dist = VectorLength(d);
 		{
 			const char *why = !s->latched ? "nolatch" :
 				s->stairs ? (bs->origin[2] >= s->topz - 8 ? "top" :
-							 FloatTime() - s->latched > IG_STAIR_PULL ? "time" :
-							 (FloatTime() - s->latched > 0.15f && speed < IG_STALL_SPEED) ? "stall" : NULL) :
+							 FloatTime() - s->latched > IG_PULL_TIME(IG_STAIR_PULL) ? "time" :
+							 (FloatTime() - s->latched > 0.15f && speed < IG_PULL_SPEED(IG_STALL_SPEED)) ? "stall" : NULL) :
 				dist > IG_RELEASE_FRAC * s->remain ? "far" :
-				(speed > IG_RELEASE_SPEED && FloatTime() - s->latched >= 0.08f) ? "fast" :   /* at full speed, keep it */
-				FloatTime() - s->latched > IG_HOOK_MAX ? "time" :
-				(FloatTime() - s->latched > 0.1f && speed < IG_STALL_SPEED) ? "stall" :
+				(speed > IG_PULL_SPEED(IG_RELEASE_SPEED) && FloatTime() - s->latched >= 0.08f) ? "fast" :   /* at full speed, keep it */
+				FloatTime() - s->latched > IG_PULL_TIME(IG_HOOK_MAX) ? "time" :
+				(FloatTime() - s->latched > 0.1f && speed < IG_PULL_SPEED(IG_STALL_SPEED)) ? "stall" :
 				!IG_HookNear(s->anchor, 48, hookpos) ? "lost" : NULL;
 			if (!why) return;
 			trap_EA_Command(c, LibVarGetString("cmd_grappleoff"));
@@ -971,11 +1006,11 @@ static void IG_HookMove(bot_state_t *bs, int infight)
 				VectorSubtract(f->anchor, bs->eye, d);
 				f->remain = VectorLength(d);
 			}
-			else if (FloatTime() - f->time < IG_FLY_MAX) return;
+			else if (FloatTime() - f->time < IG_FLY_TIME(IG_FLY_MAX)) return;
 		}
 		VectorSubtract(bs->origin, f->latched ? f->latchpos : bs->origin, d);
 		dist = VectorLength(d);
-		if (f->latched && dist < 0.5f * f->remain && FloatTime() - f->latched < IG_FIGHT_PULL && speed > IG_STALL_SPEED)
+		if (f->latched && dist < 0.5f * f->remain && FloatTime() - f->latched < IG_PULL_TIME(IG_FIGHT_PULL) && speed > IG_PULL_SPEED(IG_STALL_SPEED))
 			return;     /* still riding it; the AI aims at the enemy meanwhile */
 		trap_EA_Command(c, LibVarGetString("cmd_grappleoff"));
 		BotAI_Print(PRT_MESSAGE, "ig: fighthook release %d latched %d speed %.0f\n", c, f->latched > 0, speed);
@@ -1381,7 +1416,7 @@ static int IG_PadHook(bot_state_t *bs)
 			const char *why =
 				VectorLength(d) < IG_PAD_RELEASE && bs->origin[2] > ig_pad[c].land[2] - 32 ? "near" :
 				IG_OnGround(bs) ? "ground" :
-				FloatTime() - ig_pad[c].time > IG_PAD_MAXPULL ? "time" :
+				FloatTime() - ig_pad[c].time > IG_PAD_MAXPULL * IG_HookFlyScale() ? "time" :
 				(FloatTime() - ig_pad[c].time > 0.5f && !IG_HookNear(ig_pad[c].anchor, 300, hookpos)) ? "lost" : NULL;
 			if (!why) {
 				/* steer for the landing while pulled */
