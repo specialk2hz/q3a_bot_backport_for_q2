@@ -309,6 +309,68 @@ static int IG_SafeCorridor(bot_state_t *bs, const vec3_t flat, float length)
 /* Lava or slime beside the line (either side, IG_WALKWAY_SIDE off), out to
  * where the flight ends: only there does leaving the walkway matter. Applied
  * everywhere, the rule cost q2dm1 (no lava) a third of its slingshots. */
+/* IG-39: a flight check (libvar ig_arcsafe, default 0). Before a hook lets go
+ * or a strafe chain hops, where does the momentum take the bot? Its arc with
+ * gravity, the player's box traced in IG_ARC_STEP steps for up to IG_ARC_TIME:
+ *   touches down on floor (not liquid)          -> safe
+ *   meets lava or slime on the way or at the end -> "lava"
+ *   hits a wall at more than IG_ARC_CRASH u/s     -> "crash" (the doorframe)
+ *   still falling after IG_ARC_TIME, or IG_ARC_DROP below where it started -> "pit"
+ * Billy, q2rdm11: bots let go of slingshots and fight hooks at 975 u/s, or kept
+ * hopping, and flew into the lava or the lava-room doorframe. A hook that
+ * would fly unsafely is held (the pull ends hanging at the anchor) up to
+ * IG_ARC_HOLD seconds; a hop that would is not jumped. */
+#define IG_ARC_STEP  0.05f
+#define IG_ARC_TIME  1.5f
+#define IG_ARC_CRASH 350
+#define IG_ARC_DROP  400
+#define IG_ARC_HOLD  0.8f
+#define IG_ARC_GRAV  800
+
+static int IG_ArcSafeOn(void) { return trap_Cvar_VariableIntegerValue("ig_arcsafe") != 0; }
+
+static int IG_ArcSafe(bot_state_t *bs, const vec3_t origin, const vec3_t velocity, const char **why)
+{
+	vec3_t p, q, v, mins = { -16, -16, -24 }, maxs = { 16, 16, 32 }, down;
+	bsp_trace_t tr;
+	float t, h;
+	int k;
+
+	*why = "safe";
+	VectorCopy(origin, p);
+	VectorCopy(velocity, v);
+	for (t = 0; t < IG_ARC_TIME; t += IG_ARC_STEP) {
+		for (k = 0; k < 3; k++) q[k] = p[k] + v[k] * IG_ARC_STEP;
+		q[2] -= 0.5f * IG_ARC_GRAV * IG_ARC_STEP * IG_ARC_STEP;
+		BotAI_Trace(&tr, p, mins, maxs, q, bs->entitynum, MASK_SOLID | CONTENTS_PLAYERCLIP | IG_LIQUIDS);
+		if (tr.startsolid) return 1;   /* no telling: let the move go */
+		if (tr.fraction < 1) {
+			if (tr.contents & IG_LIQUIDS) { *why = "lava"; return 0; }
+			if (tr.plane.normal[2] > 0.7f) {
+				/* down on a floor: liquid just under it? */
+				VectorCopy(tr.endpos, down);
+				down[2] -= 8;
+				BotAI_Trace(&tr, tr.endpos, mins, maxs, down, bs->entitynum, MASK_SOLID | IG_LIQUIDS);
+				if (tr.fraction < 1 && (tr.contents & IG_LIQUIDS)) { *why = "lava"; return 0; }
+				return 1;
+			}
+			h = sqrt(v[0] * v[0] + v[1] * v[1]);
+			if (h > IG_ARC_CRASH) { *why = "crash"; return 0; }
+			/* a slow brush along a wall: slide on, the speed into it gone */
+			{
+				float dn = DotProduct(v, tr.plane.normal);
+				for (k = 0; k < 3; k++) v[k] -= dn * tr.plane.normal[k];
+			}
+			VectorCopy(tr.endpos, q);
+		}
+		v[2] -= IG_ARC_GRAV * IG_ARC_STEP;
+		VectorCopy(q, p);
+		if (p[2] < origin[2] - IG_ARC_DROP) { *why = "pit"; return 0; }
+	}
+	*why = "pit";
+	return 0;
+}
+
 static int IG_LavaBeside(bot_state_t *bs, const vec3_t flat, float length)
 {
 	vec3_t p, side, down;
@@ -793,6 +855,17 @@ static void IG_SlingshotStep(bot_state_t *bs, bot_goal_t *goal, bot_moveresult_t
 				(FloatTime() - s->latched > 0.1f && speed < IG_PULL_SPEED(IG_STALL_SPEED)) ? "stall" :
 				!IG_HookNear(s->anchor, 48, hookpos) ? "lost" : NULL;
 			if (!why) return;
+			/* IG-39: hold on while letting go would fly into lava, a pit or a wall */
+			if (s->latched && IG_ArcSafeOn() && strcmp(why, "lost") && FloatTime() - s->latched < IG_ARC_HOLD) {
+				const char *aw;
+				/* hooks: lava and pits only -- a hook pulls toward a wall, and a
+				 * slow knock near the anchor is no crash (held for it, fight
+				 * hooks lost 12 u/s) */
+				if (!IG_ArcSafe(bs, bs->origin, bs->cur_ps.velocity, &aw) && strcmp(aw, "crash")) {
+					BotAI_Print(PRT_MESSAGE, "ig: arc hold %d sling %s %s\n", c, why, aw);
+					return;
+				}
+			}
 			trap_EA_Command(c, LibVarGetString("cmd_grappleoff"));
 			if (s->stairs) BotAI_Print(PRT_MESSAGE, "ig: stairhook release %d why %s left %.0f\n", c, why, s->topz - bs->origin[2]);
 			s->stairs = 0;
@@ -1012,6 +1085,15 @@ static void IG_HookMove(bot_state_t *bs, int infight)
 		dist = VectorLength(d);
 		if (f->latched && dist < 0.5f * f->remain && FloatTime() - f->latched < IG_PULL_TIME(IG_FIGHT_PULL) && speed > IG_PULL_SPEED(IG_STALL_SPEED))
 			return;     /* still riding it; the AI aims at the enemy meanwhile */
+		/* IG-39: hold on while letting go would fly into lava, a pit or a wall */
+		if (f->latched && IG_ArcSafeOn() && FloatTime() - f->latched < IG_ARC_HOLD &&
+			IG_HookNear(f->anchor, 48, hookpos)) {
+			const char *aw;
+			if (!IG_ArcSafe(bs, bs->origin, bs->cur_ps.velocity, &aw) && strcmp(aw, "crash")) {
+				BotAI_Print(PRT_MESSAGE, "ig: arc hold %d fight %s\n", c, aw);
+				return;
+			}
+		}
 		trap_EA_Command(c, LibVarGetString("cmd_grappleoff"));
 		BotAI_Print(PRT_MESSAGE, "ig: fighthook release %d latched %d speed %.0f\n", c, f->latched > 0, speed);
 		if (f->latched) IG_HopStart(c);
@@ -1155,6 +1237,7 @@ int IG_LavaEscape(bot_state_t *bs)
 
 static struct { int on; float side; int hops; int stale; vec3_t tdir; } ig_strafe[MAX_CLIENTS];
 static float Distance2D(const vec3_t a, const vec3_t b) { return sqrt((a[0]-b[0])*(a[0]-b[0]) + (a[1]-b[1])*(a[1]-b[1])); }
+
 
 
 /* IG-38: strafe planning (libvar ig_strafeplan, default 0). The chain used to
@@ -1307,6 +1390,19 @@ static void IG_StrafeJump(bot_state_t *bs, bot_goal_t *goal, bot_moveresult_t *m
 				DotProduct(v, tdir), Distance2D(target, bs->origin), mr->traveltype & TRAVELTYPE_MASK, mr->flags, IG_SafeCorridor(bs, tdir, 300));
 			ig_strafe[c].on = 0;
 			return;
+		}
+		/* IG-39: where this hop would land */
+		if (IG_ArcSafeOn()) {
+			vec3_t jv;
+			const char *aw;
+			VectorCopy(bs->cur_ps.velocity, jv);
+			jv[2] = 270;   /* Q2's jump */
+			if (!IG_ArcSafe(bs, bs->origin, jv, &aw)) {
+				BotAI_Print(PRT_MESSAGE, "ig: arc hold %d strafe %s speed %.0f\n", c, aw, speed);
+				if (ig_strafe[c].on) BotAI_Print(PRT_MESSAGE, "ig: strafe end %d arc hops %d\n", c, ig_strafe[c].hops);
+				ig_strafe[c].on = 0;
+				return;
+			}
 		}
 		EA_Jump(c);
 		if (!ig_strafe[c].on) { BotAI_Print(PRT_MESSAGE, "ig: strafe %d start %.0f\n", c, speed); ig_strafe[c].hops = 0; }
