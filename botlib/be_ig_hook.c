@@ -106,6 +106,27 @@ static float IG_SegmentDist(const vec3_t p, const vec3_t a, const vec3_t b)
 	return VectorLength(c);
 }
 
+int IG_OwnHook(const vec3_t eye, float speed, vec3_t hookpos)
+{
+	int i, best = 0;
+	float bestd = 40 + speed * 0.1f, d;
+	vec3_t v;
+	aas_entityinfo_t entinfo, found;
+
+	for (i = AAS_NextEntity(0); i; i = AAS_NextEntity(i))
+	{
+		if (AAS_EntityType(i) != 3 /* ET_MISSILE */) continue;
+		AAS_EntityInfo(i, &entinfo);
+		if (entinfo.weapon != IG_GRAPPLE_WEAPON) continue;
+		VectorSubtract(entinfo.old_origin, eye, v);
+		d = VectorLength(v);
+		if (d < bestd) { bestd = d; best = i; found = entinfo; }
+	}
+	if (!best) return 0;
+	if (hookpos) VectorCopy(found.origin, hookpos);
+	return VectorCompare(found.origin, found.lastvisorigin) ? 2 : 1;
+}
+
 /* GrappleState() for Q2 hooks: 0 no hook of ours, 1 ours in flight (or
  * anywhere on the line), 2 ours attached at the anchor. */
 int IG_GrappleState(const vec3_t origin, const vec3_t viewoffset, const vec3_t anchor)

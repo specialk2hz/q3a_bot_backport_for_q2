@@ -8,6 +8,9 @@
 
 int IG_HookDetect(void);
 int IG_IsHookEntity(int solid, int renderfx, int modelindex, char **names, int count);
+/* IG-40: the bot's own hook, told by its hand (the hook's old_origin, which
+ * the game re-projects to its owner every frame): 0 none, 1 flying, 2 still. */
+int IG_OwnHook(const vec3_t eye, float speed, vec3_t hookpos);
 int IG_GrappleState(const vec3_t origin, const vec3_t viewoffset, const vec3_t anchor);
 void IG_AdjustGrappleCosts(void);
 int IG_HighGround(int max, int *areas, vec3_t *points);

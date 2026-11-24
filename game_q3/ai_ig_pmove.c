@@ -16,8 +16,21 @@ of the License, or (at your option) any later version.
  * units) and PM_CheckJump (a fresh press, 270 up). Collision is the real map
  * through BotAI_Trace, not the navigation mesh.
  *
+ * The hook (step 2) as osp_hook.c and ig_hook.c run it: fired from the hand
+ * (P_ProjectSource 24 8 viewheight-8) along the view, flying at ig_hookfly,
+ * latching on the first solid it touches (the sky only with ig_hooksky);
+ * after each pmove the pull SETS the velocity toward the anchor from the eye:
+ * OSP at ig_hookpull, 425 once inside 64 (hang); LMCTF (ig_hookstyle 1) at
+ * ig_hookpull minus a frame of gravity, easing in inside 120 units.
+ *
+ * Ducking as PM_CheckDuck: a crouch on the ground ducks (box top 4, run speed
+ * 100), standing again when there is room.
+ *
+ * Jump pads and teleporters are flagged when the box enters their navigation
+ * area (igpm_t.pad, .teleport), not simulated.
+ *
  * Left out, on purpose: swimming and ladders (the planner treats water as a
- * place not to go; igpm_t.contents says when the box is in it), ducking,
+ * place not to go; igpm_t.contents says when the box is in it),
  * conveyor currents, the 1/8-unit snapping, and the landing jump lock (bots
  * play with ig_botstrafehack 1, which clears it).
  *
@@ -31,6 +44,9 @@ of the License, or (at your option) any later version.
 #include "ai_ig.h"
 
 int AAS_PointContents(vec3_t point);
+int AAS_PointAreaNum(vec3_t point);
+int AAS_AreaJumpPad(int areanum);
+int AAS_AreaTeleporter(int areanum);
 float LibVarValue(const char *var_name, const char *value);
 
 #define IGPM_STEPSIZE		18
@@ -38,7 +54,7 @@ float LibVarValue(const char *var_name, const char *value);
 #define IGPM_MAX_CLIP_PLANES	5
 #define IGPM_STOP_EPSILON	0.1f
 
-static vec3_t igpm_mins = {-16, -16, -24}, igpm_maxs = {16, 16, 32};
+static vec3_t igpm_mins = {-16, -16, -24}, igpm_maxs = {16, 16, 32}, igpm_maxsducked = {16, 16, 4};
 static int igpm_traces;
 
 static void IGPM_Trace(const igpm_t *p, const vec3_t start, const vec3_t end, bsp_trace_t *tr)
@@ -47,7 +63,7 @@ static void IGPM_Trace(const igpm_t *p, const vec3_t start, const vec3_t end, bs
 
 	VectorCopy(start, s);
 	VectorCopy(end, e);
-	BotAI_Trace(tr, s, igpm_mins, igpm_maxs, e, p->passent, p->mask);
+	BotAI_Trace(tr, s, igpm_mins, p->ducked ? igpm_maxsducked : igpm_maxs, e, p->passent, p->mask);
 	igpm_traces++;
 }
 
@@ -174,6 +190,125 @@ static void IGPM_Categorize(igpm_t *p)
 	feet[2] += igpm_mins[2] + 1;
 	p->contents = AAS_PointContents(feet);
 	p->everhit |= p->contents;
+	/* jump pads and teleporters are not simulated: the run says it reached
+	 * one, and the planner takes the pad's landing from the navigation file */
+	p->area = AAS_PointAreaNum(p->org);
+	if (p->area) {
+		if (AAS_AreaJumpPad(p->area)) p->pad = 1;
+		if (AAS_AreaTeleporter(p->area)) p->teleport = 1;
+	}
+}
+
+#define IGPM_VIEWHEIGHT	22
+
+static void IGPM_HookPull(igpm_t *p);
+
+/* The order the game runs things in: a bot's two 50 ms ClientThinks (each a
+ * pmove, then GrapplePull) come before the frame's entities move, so a hook
+ * fired at a think flies at that frame's end, 0.1 s of flight at once, and a
+ * hook that bites there pulls from the next frame's first ClientThink, after
+ * its pmove. */
+static void IGPM_HookFrame(igpm_t *p, float frametime)
+{
+	vec3_t end;
+	bsp_trace_t tr;
+
+	if (p->hook >= 2) {
+		IGPM_HookPull(p);
+		return;
+	}
+	if (p->hook == 1 && (p->steps & 1)) {	/* flying: G_RunEntity's MOVETYPE_FLYMISSILE, a point */
+		frametime = 0.1f;
+		VectorMA(p->hookpos, p->hookfly * frametime, p->hookdir, end);
+		BotAI_Trace(&tr, p->hookpos, NULL, NULL, end, p->passent, CONTENTS_SOLID | CONTENTS_BODY);
+		igpm_traces++;
+		p->hookflytime += frametime;
+		VectorCopy(tr.endpos, p->hookpos);
+		if (tr.fraction < 1) {
+			if (((tr.surface.flags & SURF_SKY) && !p->hooksky) || (tr.ent >= 0 && tr.ent < MAX_CLIENTS)) {
+				p->hook = 0;	/* the sky, or a player: lost */
+				p->hooklost = 1;
+				return;
+			}
+			p->hook = 2;
+		} else if (p->hookflytime > 2) {
+			p->hook = 0;
+			p->hooklost = 1;
+		}
+	}
+}
+
+/* GrapplePull, after the pmove */
+static void IGPM_HookPull(igpm_t *p)
+{
+	vec3_t eye, dir;
+	float vlen, speed;
+
+	VectorCopy(p->org, eye);
+	eye[2] += p->ducked ? -2 : IGPM_VIEWHEIGHT;
+	VectorSubtract(p->hookpos, eye, dir);
+	vlen = VectorNormalize(dir);
+	if (p->hook == 2 && vlen < 64 && p->hookstyle == 0)
+		p->hook = 3;
+	if (p->hookstyle == 1) {	/* LMCTF: gravity still sags, glide in */
+		static const struct { float above, times; } ease[] = {
+			{ 100, 5 }, { 80, 4 }, { 40, 3 }, { 20, 2 }, { 10, 1 }
+		};
+		int i;
+
+		if (vlen > 120) {
+			VectorScale(dir, p->hookpull, p->vel);
+			p->vel[2] -= p->gravity * 0.1f;
+			return;
+		}
+		speed = 1;
+		for (i = 0; i < (int)(sizeof(ease) / sizeof(ease[0])); i++)
+			if (vlen > ease[i].above) { speed = vlen * ease[i].times; break; }
+		VectorScale(dir, speed, p->vel);
+		return;
+	}
+	VectorScale(dir, p->hook == 3 ? 425 : (int)p->hookpull, p->vel);
+}
+
+void IG_PmoveHookFire(igpm_t *p, float pitch, float yaw)
+{
+	vec3_t angles, fwd, right;
+
+	VectorSet(angles, pitch, yaw, 0);
+	AngleVectors(angles, fwd, right, NULL);
+	VectorCopy(p->org, p->hookpos);	/* P_ProjectSource: 24 forward, 8 right, viewheight - 8 up */
+	VectorMA(p->hookpos, 24, fwd, p->hookpos);
+	VectorMA(p->hookpos, 8, right, p->hookpos);
+	p->hookpos[2] += IGPM_VIEWHEIGHT - 8;
+	VectorCopy(fwd, p->hookdir);
+	p->hook = 1;
+	p->hooklost = 0;
+	p->hookflytime = 0;
+}
+
+void IG_PmoveHookRelease(igpm_t *p)
+{
+	p->hook = 0;
+}
+
+/* A hook seen in the world: `state` 2 still (bitten), 1 flying along `dir`.
+ * One that moved this frame and already touches a surface bit at the end of
+ * it: the brain sees it move once more before it is still. */
+void IG_PmoveHookAt(igpm_t *p, int state, const vec3_t pos, const vec3_t dir)
+{
+	p->hook = state;
+	VectorCopy(pos, p->hookpos);
+	if (dir) VectorCopy(dir, p->hookdir);
+	if (state == 1 && dir) {
+		vec3_t end;
+		bsp_trace_t tr;
+
+		VectorMA(pos, 4, dir, end);
+		BotAI_Trace(&tr, p->hookpos, NULL, NULL, end, p->passent, CONTENTS_SOLID | CONTENTS_BODY);
+		igpm_traces++;
+		if (tr.fraction < 1 && !((tr.surface.flags & SURF_SKY) && !p->hooksky))
+			p->hook = 2;
+	}
 }
 
 /* One pmove of `msec`. fmove/smove/upmove as in a usercmd; pitch and yaw the
@@ -183,6 +318,17 @@ void IG_Pmove(igpm_t *p, float fmove, float smove, float upmove, float pitch, fl
 	float frametime = msec * 0.001f, speed, newspeed, control, wishspeed, add, acc, accel;
 	vec3_t angles, fwd, right, wishvel, wishdir;
 	int i;
+
+	/* PM_CheckDuck, with the ground from the last pmove (PMF_ON_GROUND) */
+	if (upmove < 0 && p->ground) {
+		p->ducked = 1;
+	} else if (p->ducked) {
+		bsp_trace_t tr;
+
+		p->ducked = 0;
+		IGPM_Trace(p, p->org, p->org, &tr);
+		if (tr.allsolid) p->ducked = 1;
+	}
 
 	IGPM_Categorize(p);
 
@@ -216,7 +362,7 @@ void IG_Pmove(igpm_t *p, float fmove, float smove, float upmove, float pitch, fl
 	wishvel[2] = 0;
 	VectorCopy(wishvel, wishdir);
 	wishspeed = VectorNormalize(wishdir);
-	if (wishspeed > p->maxspeed) wishspeed = p->maxspeed;
+	if (wishspeed > (p->ducked ? 100 : p->maxspeed)) wishspeed = p->ducked ? 100 : p->maxspeed;
 
 	accel = p->ground ? 10 : 1;
 	if (p->ground) p->vel[2] = 0;
@@ -235,8 +381,10 @@ void IG_Pmove(igpm_t *p, float fmove, float smove, float upmove, float pitch, fl
 		IGPM_StepSlideMove(p, frametime);
 	}
 
+	IGPM_HookFrame(p, frametime);
 	IGPM_Categorize(p);
 	p->time += frametime;
+	p->steps++;
 }
 
 void IG_PmoveInit(igpm_t *p, const vec3_t org, const vec3_t vel, int ground, int passent, int withplayers)
@@ -252,6 +400,10 @@ void IG_PmoveInit(igpm_t *p, const vec3_t org, const vec3_t vel, int ground, int
 	p->friction = LibVarValue("phys_friction", "6");
 	if (p->friction <= 0) p->friction = 6;
 	p->maxspeed = 300;
+	p->hookstyle = trap_Cvar_VariableIntegerValue("ig_hookstyle");
+	p->hooksky = trap_Cvar_VariableIntegerValue("ig_hooksky");
+	p->hookfly = LibVarValue("ig_hookfly", "1600");
+	p->hookpull = LibVarValue("ig_hookpull", "1000");
 }
 
 int IG_PmoveTraces(void)

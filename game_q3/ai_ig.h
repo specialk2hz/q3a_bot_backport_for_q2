@@ -27,11 +27,20 @@ void IG_CombatHook(bot_state_t *bs);
 /* ai_ig_pmove.c -- Quake II's player movement, for prediction (IG-40) */
 typedef struct {
 	vec3_t	org, vel, groundnormal;
-	int		ground, jumpheld, passent, mask;
+	int		ground, jumpheld, passent, mask, ducked;
 	float	gravity, friction, maxspeed, time;
 	int		contents, everhit;		/* at the feet now; ever, over the run */
 	int		blocked, hitplayer, jumped;	/* hit a wall / a player, jumped, over the run */
+	/* the hook (IG-40 step 2): 0 none, 1 flying, 2 pulling, 3 hanging (OSP, inside 64) */
+	int		hook, hookstyle, hooksky, hooklost;	/* style 0 OSP, 1 LMCTF; lost: missed or hit sky */
+	vec3_t	hookpos, hookdir;
+	float	hookfly, hookpull, hookflytime;
+	int		steps;	/* pmoves run; the hook flies after every second (the game frame's end) */
+	int		area, pad, teleport;	/* the navigation area now; entered a jump pad / teleporter (sticky) */
 } igpm_t;
+void IG_PmoveHookFire(igpm_t *p, float pitch, float yaw);
+void IG_PmoveHookRelease(igpm_t *p);
+void IG_PmoveHookAt(igpm_t *p, int state, const vec3_t pos, const vec3_t dir);
 void IG_PmoveInit(igpm_t *p, const vec3_t org, const vec3_t vel, int ground, int passent, int withplayers);
 void IG_Pmove(igpm_t *p, float fmove, float smove, float upmove, float pitch, float yaw, int msec);
 int  IG_PmoveTraces(void);
