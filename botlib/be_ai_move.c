@@ -3552,7 +3552,8 @@ static void IG_DrillBuild(void)
 	if (mode == 2 && LibVarValue("ig_drillreach", "0") > 0)
 		best = (int) LibVarValue("ig_drillreach", "0");   /* "r<n>": that route */
 	if (mode == 2 && best > 0) igdr.list[igdr.count++] = best;
-	botimport.Print(PRT_MESSAGE, "igdrill: %d climb route(s), %d tries each\n", igdr.count, (int) LibVarValue("ig_drilltries", "10"));
+	botimport.Print(PRT_MESSAGE, "igdrill: %d climb route(s), %d tries each, map %s reachsize %d\n", igdr.count,
+					(int) LibVarValue("ig_drilltries", "10"), aasworld.mapname, aasworld.reachabilitysize);
 }
 
 static void IG_DrillOutcome(bot_movestate_t *ms, const char *what)
@@ -3638,7 +3639,8 @@ static int IG_Drill(bot_movestate_t *ms, bot_moveresult_t *result)
 			}
 			igdr.aim = n ? aims[igdr.tryn % n] : 0;
 		}
-		IG_ClimbAimForce(ms->client, igdr.aim);
+		/* aim 3: no forcing -- the bot's own choice (ig_climbaim and the map's climb table) */
+		IG_ClimbAimForce(ms->client, igdr.aim == 3 ? -1 : igdr.aim);
 		IG_ClimbAimClear(ms->client);
 		VectorSubtract(r->end, r->start, dir);
 		vectoangles(dir, ang);
@@ -3697,6 +3699,10 @@ static int IG_Drill(bot_movestate_t *ms, bot_moveresult_t *result)
 		IG_ClimbLandMove(ms, result);
 		return 1;
 	case IG_DR_PAUSE:
+		/* keep facing the way it landed (Billy: it turned to look at him) */
+		VectorCopy(ms->viewangles, result->ideal_viewangles);
+		result->ideal_viewangles[PITCH] = 0;
+		result->flags |= MOVERESULT_MOVEMENTVIEW;
 		if (now - igdr.t0 < LibVarValue("ig_drillpause", "0.3")) return 1;
 		if (++igdr.tryn >= tries) { igdr.idx++; igdr.tryn = 0; }
 		igdr.phase = IG_DR_PICK;

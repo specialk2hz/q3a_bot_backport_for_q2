@@ -669,6 +669,7 @@ int IG_PadFlight(int client, vec3_t end)
 typedef struct
 {
 	unsigned char done, hasframe, hasfloor;
+	unsigned char usebspc;       /* the map's climb table says bspc's anchor lands better here */
 	float oz;                    /* the landing floor, in origin space */
 	vec3_t spot, frame, floor;
 } ig_climbaim_t;
@@ -961,6 +962,43 @@ static void IG_ClimbAimCompute(int reachnum, const aas_reachability_t *reach)
 					reach->end[0], reach->end[1], reach->end[2]);
 }
 
+/* The map's climb table (maps/<map>.climbs, next to its .aas, made from the
+ * climb drill by the server repo's tools/climb-table.py): the routes where
+ * bspc's anchor landed clearly more often than the frame anchor. Text:
+ *   reachsize <n>      the .aas the drill ran on; another .aas ignores the table
+ *   bspc <reachnum>    one per line
+ * Without a table every route takes the frame anchor (where it has one). */
+static void IG_ClimbTableLoad(void)
+{
+	char path[MAX_QPATH], *buf, *line, *next;
+	fileHandle_t fp;
+	int len, n = 0, size = -1, r;
+
+	Com_sprintf(path, sizeof(path), "maps/%s.climbs", aasworld.mapname);
+	len = botimport.FS_FOpenFile(path, &fp, FS_READ);
+	if (!fp || len <= 0) return;
+	buf = calloc(len + 1, 1);
+	if (!buf) { botimport.FS_FCloseFile(fp); return; }
+	botimport.FS_Read(buf, len, fp);
+	botimport.FS_FCloseFile(fp);
+	for (line = buf; line && *line; line = next)
+	{
+		next = strchr(line, '\n');
+		if (next) *next++ = 0;
+		if (sscanf(line, "reachsize %d", &size) == 1) continue;
+		if (sscanf(line, "bspc %d", &r) == 1 && size == aasworld.reachabilitysize && r > 0 && r < ig_climbsize)
+		{
+			ig_climb[r].usebspc = 1;
+			n++;
+		}
+	}
+	free(buf);
+	if (size != aasworld.reachabilitysize)
+		botimport.Print(PRT_MESSAGE, "ig: %s is for another navigation file (%d routes, this one %d), ignored\n", path, size, aasworld.reachabilitysize);
+	else
+		botimport.Print(PRT_MESSAGE, "ig: %s: %d climb route(s) keep bspc's anchor\n", path, n);
+}
+
 static ig_climbaim_t *IG_ClimbAimGet(int reachnum, const aas_reachability_t *reach)
 {
 	if (reachnum <= 0 || reachnum >= aasworld.reachabilitysize) return NULL;
@@ -970,6 +1008,7 @@ static ig_climbaim_t *IG_ClimbAimGet(int reachnum, const aas_reachability_t *rea
 		ig_climbsize = aasworld.reachabilitysize;
 		ig_climb = calloc(ig_climbsize, sizeof(*ig_climb));
 		if (!ig_climb) { ig_climbsize = 0; return NULL; }
+		if (LibVarValue("ig_climbtable", "1")) IG_ClimbTableLoad();
 	}
 	if (!ig_climb[reachnum].done) IG_ClimbAimCompute(reachnum, reach);
 	return &ig_climb[reachnum];
@@ -998,6 +1037,9 @@ int IG_ClimbAimReach(int client, int reachnum, const aas_reachability_t *reach, 
 	if (client < 0 || client >= MAX_CLIENTS || !(mode = IG_ClimbAimFor(client))) return 0;
 	ca = IG_ClimbAimGet(reachnum, reach);
 	if (!ca || (ca->spot[0] == 0 && ca->spot[1] == 0 && ca->spot[2] == 0)) return 0;
+	/* the table's routes are plain bspc -- what the drill measured them against
+	 * (the drill's forced aims ignore the table) */
+	if (ca->usebspc && ig_caforce[client] < 0) return 0;
 	if (mode == 2 || !ca->hasframe)
 	{   /* bspc's anchor, IG-36's landing */
 		ig_capick[client] = reachnum + 1;
