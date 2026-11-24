@@ -24,6 +24,18 @@ int  IG_LastEvidence(int bot, int enemy, vec3_t pos, float *time);
 void IG_Slingshot(bot_state_t *bs, bot_goal_t *goal, bot_moveresult_t *moveresult);
 void IG_CombatHook(bot_state_t *bs);
 
+/* ai_ig_pmove.c -- Quake II's player movement, for prediction (IG-40) */
+typedef struct {
+	vec3_t	org, vel, groundnormal;
+	int		ground, jumpheld, passent, mask;
+	float	gravity, friction, maxspeed, time;
+	int		contents, everhit;		/* at the feet now; ever, over the run */
+	int		blocked, hitplayer, jumped;	/* hit a wall / a player, jumped, over the run */
+} igpm_t;
+void IG_PmoveInit(igpm_t *p, const vec3_t org, const vec3_t vel, int ground, int passent, int withplayers);
+void IG_Pmove(igpm_t *p, float fmove, float smove, float upmove, float pitch, float yaw, int msec);
+int  IG_PmoveTraces(void);
+
 /* ai_ig_revenge.c */
 int  IG_RevengeTarget(bot_state_t *bs);
 void IG_RevengeDeath(bot_state_t *bs, int attacker);

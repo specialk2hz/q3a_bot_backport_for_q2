@@ -134,6 +134,7 @@ extern int  BotAISetupClient(int client, struct bot_settings_s *settings, qboole
 extern int  BotAIShutdownClient(int client, qboolean restart);
 extern int  BotAI(int client, float thinktime);
 extern void BotUpdateInput(bot_state_t *bs, float thinktime);
+extern void IG_PredCheck(bot_state_t *bs, const bot_input_t *bi); /* IG: ai_ig_pred.c */
 extern void BotChooseWeapon(bot_state_t *bs);
 extern int  AINode_Battle_Fight(bot_state_t *bs);
 extern void BotSetupDeathmatchAI(void);
@@ -2622,6 +2623,7 @@ static int Q2BotAI(int client, float thinktime)
     IG_GrappleWatchdog(client); /* IG: let go of an orphaned hook (IG-6) */
     Com_Memset(&q3input, 0, sizeof(q3input));
     EA_GetInput(client, thinktime, &q3input);
+    IG_PredCheck(bs, &q3input); /* IG: planner step 1, predictor vs real movement (ig_predcheck) */
     q2_lastattack[client] = (q3input.actionflags & 0x0000001) != 0;  /* ACTION_ATTACK */
 
     Com_Memset(&q2input, 0, sizeof(q2input));

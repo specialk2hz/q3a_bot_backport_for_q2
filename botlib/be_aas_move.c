@@ -533,6 +533,13 @@ int AAS_ClipToBBox(aas_trace_t *trace, vec3_t start, vec3_t end, int presencetyp
 // Returns:				aas_clientmove_t
 // Changes Globals:		-
 //===========================================================================
+/* IG: planner step 1 (ai_ig_pred.c). Nonzero: predict with Quake II's
+ * physics instead of the stock code's -- ground friction where stock Q3 has
+ * ground and water friction swapped, gravity per frame that is right at any
+ * frametime (stock is right only at 0.1 s), Q2's 300 u/s run speed and 18-unit
+ * step, and a Q2 jump (270 up, no extra 5). 0 (default): upstream. */
+int aas_ig_q2phys = 0;
+
 int AAS_ClientMovementPrediction(struct aas_clientmove_s *move,
 								int entnum, vec3_t origin,
 								int presencetype, int onground,
@@ -573,6 +580,7 @@ int AAS_ClientMovementPrediction(struct aas_clientmove_s *move,
 	phys_airaccelerate = aassettings.phys_airaccelerate;
 	phys_swimaccelerate = aassettings.phys_swimaccelerate;
 	phys_maxstep = aassettings.phys_maxstep;
+	if (aas_ig_q2phys) { phys_maxwalkvelocity = 300; phys_maxstep = 18; } // IG: Q2 pm_maxspeed, STEPSIZE
 	phys_maxsteepness = aassettings.phys_maxsteepness;
 	phys_jumpvel = aassettings.phys_jumpvel * frametime;
 	//
@@ -592,11 +600,12 @@ int AAS_ClientMovementPrediction(struct aas_clientmove_s *move,
 		//get gravity depending on swimming or not
 		gravity = swimming ? phys_watergravity : phys_gravity;
 		//apply gravity at the START of the frame
-		frame_test_vel[2] = frame_test_vel[2] - (gravity * 0.1 * frametime);
+		frame_test_vel[2] = frame_test_vel[2] - (gravity * (aas_ig_q2phys ? frametime : 0.1) * frametime); // IG: q2phys
 		//if on the ground or swimming
 		if (onground || swimming)
 		{
 			friction = swimming ? phys_friction : phys_waterfriction;
+			if (aas_ig_q2phys) friction = swimming ? phys_waterfriction : phys_friction; // IG: stock has them swapped
 			//apply friction
 			VectorScale(frame_test_vel, 1/frametime, frame_test_vel);
 			AAS_ApplyFriction(frame_test_vel, friction, phys_stopspeed, frametime);
@@ -622,6 +631,7 @@ int AAS_ClientMovementPrediction(struct aas_clientmove_s *move,
 				{
 					//jump velocity minus the gravity for one frame + 5 for safety
 					frame_test_vel[2] = phys_jumpvel - (gravity * 0.1 * frametime) + 5;
+					if (aas_ig_q2phys) frame_test_vel[2] = phys_jumpvel - gravity * frametime * frametime; // IG: q2phys
 					jump_frame = n;
 					//jumping so air accelerate
 					accelerate = phys_airaccelerate;
