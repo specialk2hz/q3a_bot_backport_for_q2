@@ -49,15 +49,17 @@ void EA_IGMove(int client, vec3_t dir, float speed, int jump, int crouch);
 #define PLAN_THINKS		12		/* 1.2 s ahead */
 #define PLAN_MARGIN		0.06f	/* options this close to the best are all fair picks (s) */
 #define PLAN_KEEP		0.04f	/* the option under way gets this much benefit of the doubt (s) */
+#define PLAN_COMMIT		0.25f	/* a flick is a promise: its fire, next think, unless that turned bad (s) */
 #define PLAN_SPEEDBONUS	0.35f	/* s saved per 300 u/s carried along the route beyond running speed */
 /* A hook has a price: a seasoned player does not hook for a 2% gain. In
  * seconds, scaled by the bot's hook affinity (a grapple lover pays less):
  * libvar ig_planhookcost (s at the middle affinity, 0.55). */
+#define PLAN_COAST		15		/* up to 1.5 s more, running the route, until the extra speed is spent */
 #define PLAN_MAXANCH	12
 #define PLAN_MAXOPT		32
 
-enum { PO_RUN, PO_HOP, PO_SLING, PO_FIRE, PO_HOLD, PO_LETGO, PO_LETGOHOP };
-static const char *po_names[] = { "run", "hop", "sling", "fire", "hold", "letgo", "letgohop" };
+enum { PO_RUN, PO_HOP, PO_SLING, PO_FIRE, PO_HOLD, PO_LETGO, PO_LETGOHOP, PO_HOLDHOP };
+static const char *po_names[] = { "run", "hop", "sling", "fire", "hold", "letgo", "letgohop", "holdhop" };
 
 typedef struct {
 	int		kind;
@@ -95,6 +97,11 @@ static struct {
 	float	lastlog;
 	float	steered;	/* the think the planner set the input itself */
 	float	viewset;	/* the think the planner set the view (a flick, or holding one) */
+	/* this think's decision: the AI may run two nodes in one think (a node
+	 * switch), and each calls the planner -- the second gets the first's */
+	float	decided;
+	int		ret, setmove, jump;
+	vec3_t	wish, view;
 } igp_state[MAX_CLIENTS];
 
 /* ------------------------------------------------------------ diagnostics */
@@ -133,12 +140,18 @@ void IG_PlanTick(bot_state_t *bs)
 
 /* ---------------------------------------------------------------- route */
 
-static int IGX_RouteDir(igx_t *x, const vec3_t org, int area, vec3_t dir)
+/* The route's way from org. *special: the route's next step there is one
+ * the simulation does not model -- a gap jump, a barrier jump, a ladder, a
+ * lift, a climb, a pad, a teleporter: the stock movement takes those, and a
+ * simulated run would walk off the gap's edge (brutalo, q2rdm4: upper level
+ * time fell 4-7 points while it did). */
+static int IGX_RouteDirS(igx_t *x, const vec3_t org, int area, vec3_t dir, int *special)
 {
-	int tt, rn;
+	int tt, rn, tv;
 	aas_reachability_t r;
 	vec3_t t, o;
 
+	if (special) *special = 0;
 	if (!area) return 0;
 	VectorCopy(org, o);
 	if (area == x->goalarea) {
@@ -146,6 +159,8 @@ static int IGX_RouteDir(igx_t *x, const vec3_t org, int area, vec3_t dir)
 	} else {
 		if (!AAS_AreaRouteToGoalArea(area, o, x->goalarea, x->tfl, &tt, &rn) || !rn) return 0;
 		AAS_ReachabilityFromNum(rn, &r);
+		tv = r.traveltype & TRAVELTYPE_MASK;
+		if (special && tv != TRAVEL_WALK && tv != TRAVEL_WALKOFFLEDGE) *special = 1;
 		VectorCopy(r.start, t);
 		/* at the reachability's start already: head across it */
 		if ((r.start[0] - o[0]) * (r.start[0] - o[0]) + (r.start[1] - o[1]) * (r.start[1] - o[1]) < 40 * 40)
@@ -154,6 +169,11 @@ static int IGX_RouteDir(igx_t *x, const vec3_t org, int area, vec3_t dir)
 	VectorSubtract(t, o, dir);
 	dir[2] = 0;
 	return VectorNormalize(dir) > 1;
+}
+
+static int IGX_RouteDir(igx_t *x, const vec3_t org, int area, vec3_t dir)
+{
+	return IGX_RouteDirS(x, org, area, dir, NULL);
 }
 
 /* In the air: the wish that keeps the most speed while turning toward the
@@ -247,6 +267,7 @@ static void IGX_Simulate(igx_t *x, igopt_t *o)
 	vec3_t route, lastroute, end, vh;
 	int t, latch = -1, airjump = -1, half, area, tt;
 	float fm, sm, up, wallpen = 0, along, before, after;
+	int stop = 0;
 
 	IGX_Start(x, &pm);
 	o->ok = 0;
@@ -256,9 +277,14 @@ static void IGX_Simulate(igx_t *x, igopt_t *o)
 		VectorNormalize(lastroute);
 	}
 	for (t = 0; t < PLAN_THINKS; t++) {
+		int special;
+
 		if (pm.hook >= 2 && latch < 0) latch = t;
-		if (IGX_RouteDir(x, pm.org, pm.area, route)) VectorCopy(route, lastroute);
+		if (IGX_RouteDirS(x, pm.org, pm.area, route, &special)) VectorCopy(route, lastroute);
 		else VectorCopy(lastroute, route);
+		/* on the ground where the route takes a step of its own: the stock
+		 * movement takes it from here, and the travel time counts it */
+		if (special && t > 0 && pm.ground && !pm.hook) { stop = 1; break; }
 		IGX_Input(x, o, t, &pm, route, latch, &in);
 		if (in.letgo) IG_PmoveHookRelease(&pm);
 		if (in.fire) {
@@ -289,6 +315,39 @@ static void IGX_Simulate(igx_t *x, igopt_t *o)
 	}
 	if (pm.hook == 1 && pm.hooklost) wallpen += 0.05f;	/* a wasted hook */
 
+	/* Then run the route until the momentum is spent: every option is scored
+	 * where its extra speed is used up, not at a fixed time, so speed counts
+	 * as the ground it covers. (v1 scored speed at the 1.2 s mark with a
+	 * bonus; a slingshot's speed fades after the let-go, so its score fell
+	 * every think as the mark slid on, and half the flicks never fired.) */
+	if (!pm.pad && !pm.teleport && !stop) {
+		igopt_t run;
+
+		Com_Memset(&run, 0, sizeof(run));
+		run.anchor = run.fire = -1;
+		IG_PmoveHookRelease(&pm);
+		for (t = 0; t < PLAN_COAST; t++) {
+			int special;
+
+			VectorSet(vh, pm.vel[0], pm.vel[1], 0);
+			if (pm.ground && VectorLength(vh) < 330) break;
+			if (IGX_RouteDirS(x, pm.org, pm.area, route, &special)) VectorCopy(route, lastroute);
+			else VectorCopy(lastroute, route);
+			if (special && pm.ground) break;
+			IGX_Input(x, &run, PLAN_THINKS + t, &pm, route, -1, &in);
+			IGX_Moves(in.wish, in.view[YAW], &fm, &sm);
+			before = VectorLength(vh);
+			pm.blocked = 0;
+			for (half = 0; half < 2; half++)
+				IG_Pmove(&pm, fm, sm, 0, in.view[PITCH], in.view[YAW], 50);
+			if (pm.everhit & (CONTENTS_LAVA | CONTENTS_SLIME)) return;
+			VectorSet(vh, pm.vel[0], pm.vel[1], 0);
+			after = VectorLength(vh);
+			if (pm.blocked && before - after > 200) wallpen += 0.15f * (before - after) / 300;
+			if (pm.pad || pm.teleport) break;
+		}
+	}
+
 	/* where it ends: the route's time from there */
 	area = pm.area;
 	VectorCopy(pm.org, end);
@@ -309,7 +368,7 @@ static void IGX_Simulate(igx_t *x, igopt_t *o)
 	VectorSet(vh, pm.vel[0], pm.vel[1], 0);
 	if (!IGX_RouteDir(x, end, area, route)) VectorCopy(lastroute, route);
 	along = DotProduct(vh, route);
-	o->cost = pm.time + tt * 0.01f - PLAN_SPEEDBONUS * (along > 300 ? (along > 750 ? 1.5f : (along - 300) / 300) : 0) + wallpen;
+	o->cost = pm.time + tt * 0.01f - PLAN_SPEEDBONUS * (along > 330 ? (along - 330) / 300 : 0) + wallpen;	/* what speed is left, if the coast ran out */
 	o->ok = 1;
 }
 
@@ -355,7 +414,10 @@ static void IGX_Flick(bot_state_t *bs, const vec3_t view)
 {
 	int i;
 
-	if (bs->client >= 0 && bs->client < MAX_CLIENTS) igp_state[bs->client].viewset = FloatTime();
+	if (bs->client >= 0 && bs->client < MAX_CLIENTS) {
+		igp_state[bs->client].viewset = FloatTime();
+		VectorCopy(view, igp_state[bs->client].view);
+	}
 	VectorCopy(view, bs->ideal_viewangles);
 	bs->flags |= BFL_IDEALVIEWSET;
 	for (i = 0; i < 2; i++) {
@@ -376,6 +438,14 @@ int IG_Plan(bot_state_t *bs, bot_goal_t *goal, bot_moveresult_t *mr)
 
 	if (!IG_PlanOn() || c < 0 || c >= MAX_CLIENTS || BotIsDead(bs) || !goal || !goal->areanum) return 0;
 	igp_lastplan[c] = FloatTime();
+	if (FloatTime() - igp_state[c].decided < 0.001f) {		/* decided this think already: the same again */
+		if (igp_state[c].setmove) EA_IGMove(c, igp_state[c].wish, 400, igp_state[c].jump, 0);
+		if (FloatTime() - igp_state[c].viewset < 0.001f) IGX_Flick(bs, igp_state[c].view);
+		return igp_state[c].ret;
+	}
+	igp_state[c].decided = FloatTime();
+	igp_state[c].ret = 0;
+	igp_state[c].setmove = 0;
 	Com_Memset(&x, 0, sizeof(x));
 	x.bs = bs;
 	x.goalarea = goal->areanum;
@@ -386,7 +456,7 @@ int IG_Plan(bot_state_t *bs, bot_goal_t *goal, bot_moveresult_t *mr)
 	x.hookcost = LibVarValue("ig_planhookcost", "0.3") * (1.6f - IG_PlanAffinity(bs)) / (1.6f - 0.55f);
 	VectorCopy(bs->viewangles, x.lastview);
 	if (x.lastview[PITCH] > 180) x.lastview[PITCH] -= 360;
-	if (igp_state[c].flicktime > 0 && FloatTime() - igp_state[c].flicktime < 0.15f)
+	if (igp_state[c].flicktime > 0 && FloatTime() - igp_state[c].flicktime < 0.15f && FloatTime() - igp_state[c].flicktime > 0.001f)
 		VectorCopy(igp_state[c].flickview, x.lastview);
 
 	VectorCopy(bs->cur_ps.origin, eye);
@@ -426,11 +496,14 @@ int IG_Plan(bot_state_t *bs, bot_goal_t *goal, bot_moveresult_t *mr)
 		OPT(PO_LETGO, 0, 0, -1, -1, 0, 1);
 		OPT(PO_LETGOHOP, 1, 0, -1, -1, 0, 1);
 		for (k = 1; k <= 4; k++) OPT(PO_HOLD, 0, 0, -1, -1, k * k == 16 ? 8 : k, 0);	/* 1, 2, 3, 8 thinks */
+		/* T3, the pull hop: hop off the floor while the hook drags (friction eats the pull) */
+		if (ground) for (k = 2; k <= 3; k++) OPT(PO_HOLDHOP, 1, 0, -1, -1, k, 0);
 	} else {
 		OPT(PO_RUN, 0, 0, -1, -1, 0, 0);
 		OPT(PO_HOP, 1, ground, -1, -1, 0, 0);
 		/* flicked onto an anchor last think: it can go now */
-		if (igp_state[c].anchorset && FloatTime() - igp_state[c].flicktime < 0.15f && x.canfire) {
+		if (igp_state[c].anchorset && FloatTime() - igp_state[c].flicktime < 0.15f &&
+			FloatTime() - igp_state[c].flicktime > 0.001f && x.canfire) {
 			OPT(PO_FIRE, 0, 0, -1, 0, 3, 0);
 		}
 		if (x.canfire) {
@@ -449,12 +522,25 @@ int IG_Plan(bot_state_t *bs, bot_goal_t *goal, bot_moveresult_t *mr)
 		VectorCopy(keepview, x.lastview);
 		if (!opts[i].ok) continue;
 		/* the option under way gets the benefit of the doubt */
-		if (opts[i].kind == igp_state[c].kind || (opts[i].kind == PO_FIRE && igp_state[c].kind == PO_SLING))
+		/* a bot that snapped its view onto a spot hooks it: flicks that came
+		 * to nothing were half of them in v1, a view twitching at walls */
+		if (opts[i].kind == PO_FIRE) opts[i].cost -= PLAN_COMMIT;
+		else if (opts[i].kind == igp_state[c].kind ||
+				 (opts[i].kind == PO_HOLDHOP && igp_state[c].kind == PO_HOLD) || (opts[i].kind == PO_HOLD && igp_state[c].kind == PO_HOLDHOP))
 			opts[i].cost -= PLAN_KEEP;
 		if (opts[i].cost < bestcost) {
 			bestcost = opts[i].cost;
 			best = i;
 		}
+	}
+	if (trap_Cvar_VariableIntegerValue("ig_plandebug") == 2 && igp_state[c].anchorset && FloatTime() - igp_state[c].flicktime < 0.15f) {
+		int nf = 0, fok = 0;
+		float fc = 0;
+
+		for (i = 0; i < n; i++)
+			if (opts[i].kind == PO_FIRE) { nf++; fok = opts[i].ok; fc = opts[i].cost; }
+		BotAI_Print(PRT_MESSAGE, "igpafter %d fireopt %d ok %d cost %.2f best %.2f canfire %d hook %d dt %.3f ground %d\n", c, nf, fok, fc,
+					bestcost, x.canfire, x.hook, FloatTime() - igp_state[c].flicktime, ground);
 	}
 	if (best < 0) {
 		/* every option ends in lava or a pit: let go if hooked, else the stock move */
@@ -492,13 +578,19 @@ int IG_Plan(bot_state_t *bs, bot_goal_t *goal, bot_moveresult_t *mr)
 			if (!ground && igp_state[c].active) {	/* our flight: steer it */
 				EA_IGMove(c, in.wish, 400, 0, 0);
 				igp_state[c].steered = FloatTime();
-				return 1;
+				igp_state[c].setmove = 1;
+				VectorCopy(in.wish, igp_state[c].wish);
+				igp_state[c].jump = 0;
+				return igp_state[c].ret = 1;
 			}
 			igp_state[c].active = 0;
 			return 0;	/* the stock route move */
 		}
 		EA_IGMove(c, in.wish, 400, in.jump, 0);
 		igp_state[c].steered = FloatTime();
+		igp_state[c].setmove = 1;
+		VectorCopy(in.wish, igp_state[c].wish);
+		igp_state[c].jump = in.jump;
 		if (o->anchor >= 0) {
 			IGX_Flick(bs, x.anchorview[o->anchor]);
 			VectorCopy(x.anchorview[o->anchor], igp_state[c].flickview);
@@ -526,15 +618,15 @@ int IG_Plan(bot_state_t *bs, bot_goal_t *goal, bot_moveresult_t *mr)
 							igp_state[c].anchor[2], eye[0], eye[1], eye[2]);
 		}
 		if (x.hook) IG_GrappleTravelNote(c);	/* ours: the watchdog keeps off */
-		if (ground && o->kind != PO_HOLD) igp_state[c].chain = 0;
+		if (ground && o->kind != PO_HOLD && o->kind != PO_HOLDHOP) igp_state[c].chain = 0;
 		igp_state[c].kind = o->kind;
 		igp_state[c].active = 1;
-		if (trap_Cvar_VariableIntegerValue("ig_plandebug") && (o->kind != PO_HOLD || FloatTime() - igp_state[c].lastlog > 0.5f)) {
+		if (trap_Cvar_VariableIntegerValue("ig_plandebug") && ((o->kind != PO_HOLD && o->kind != PO_HOLDHOP) || FloatTime() - igp_state[c].lastlog > 0.5f)) {
 			igp_state[c].lastlog = FloatTime();
 			BotAI_Print(PRT_MESSAGE, "ig: plan %d %s cost %.2f best %.2f options %d\n", c, po_names[o->kind], o->cost, bestcost, n);
 		}
 	}
-	return 1;
+	return igp_state[c].ret = 1;
 }
 
 /* ---------------------------------------------------------------- guard */
@@ -577,14 +669,30 @@ static int IGX_Unsafe(igx_t *x, const vec3_t dir, float speed, int jump, int cro
  * 135 degrees either way, then still. Combat strafing walked bots off
  * q2rdm11's walkways into the lava; stopping or reversing outright, the first
  * version of this, cost brutalo's platform fights 40 u/s. */
+static void IGX_InputCheck(bot_state_t *bs, const bot_input_t *bi)
+{
+	int c = bs->client, jump = (bi->actionflags & (ACTION_JUMP | ACTION_DELAYEDJUMP)) != 0;
+	vec3_t d;
+
+	if (trap_Cvar_VariableIntegerValue("ig_plandebug") != 2 || FloatTime() - igp_state[c].steered > 0.001f) return;
+	VectorSet(d, bi->dir[0], bi->dir[1], 0);
+	VectorNormalize(d);
+	BotAI_Print(PRT_MESSAGE, "igpin %d dirdot %.2f speed %.0f jump %d/%d keys %d view %.1f/%.1f %.1f/%.1f\n", c,
+				DotProduct(d, igp_state[c].wish), bi->speed, jump, igp_state[c].jump,
+				(bi->actionflags & (ACTION_MOVEFORWARD | ACTION_MOVEBACK | ACTION_MOVELEFT | ACTION_MOVERIGHT | ACTION_CROUCH)) != 0,
+				bi->viewangles[PITCH], bi->viewangles[YAW], igp_state[c].view[PITCH], igp_state[c].view[YAW]);
+}
+
 void IG_PlanGuard(bot_state_t *bs, bot_input_t *bi)
 {
+	if (bs->client >= 0 && bs->client < MAX_CLIENTS) IGX_InputCheck(bs, bi);
 	igx_t x;
 	vec3_t eye, back, zero = {0, 0, 0};
 	int c = bs->client, jump, crouch;
 	float pitch;
 
 	if (!IG_PlanOn() || c < 0 || c >= MAX_CLIENTS || BotIsDead(bs)) return;
+	if (!LibVarValue("ig_planguard", "1")) return;	/* testing: the guard off */
 	if (FloatTime() - igp_state[c].steered < 0.001f) return;	/* the planner's own, already flown */
 	/* the route's own move follows the navigation file, which keeps off lava;
 	 * fights dodge with no thought for edges */
