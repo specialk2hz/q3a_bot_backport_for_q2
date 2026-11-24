@@ -55,6 +55,7 @@ void IG_PlanTick(bot_state_t *bs);
 void IG_PlanGuard(bot_state_t *bs, bot_input_t *bi);
 int  IG_PlanFireUnsafe(bot_state_t *bs, const vec3_t anchor, int hold);
 int  IG_PlanHookUnsafe(bot_state_t *bs, int hold);
+int  IG_PlanFight(bot_state_t *bs);
 
 /* ai_ig_revenge.c */
 int  IG_RevengeTarget(bot_state_t *bs);

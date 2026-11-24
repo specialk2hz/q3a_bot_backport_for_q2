@@ -47,6 +47,8 @@ int AAS_PointContents(vec3_t point);
 int AAS_PointAreaNum(vec3_t point);
 int AAS_AreaJumpPad(int areanum);
 int AAS_AreaTeleporter(int areanum);
+int AAS_AreaLava(int areanum);
+int AAS_AreaSlime(int areanum);
 float LibVarValue(const char *var_name, const char *value);
 
 #define IGPM_STEPSIZE		18
@@ -196,6 +198,12 @@ static void IGPM_Categorize(igpm_t *p)
 	if (p->area) {
 		if (AAS_AreaJumpPad(p->area)) p->pad = 1;
 		if (AAS_AreaTeleporter(p->area)) p->teleport = 1;
+		/* bspc makes a trigger_hurt (a pit's death zone) lava in the
+		 * navigation file, where the map itself has none: a dodge into
+		 * tltf2's and brutalo's voids was "safe" while there was a floor
+		 * somewhere below. Lava in the navigation file is lava here. */
+		if (AAS_AreaLava(p->area)) p->everhit |= CONTENTS_LAVA;
+		else if (AAS_AreaSlime(p->area)) p->everhit |= CONTENTS_SLIME;
 	}
 }
 

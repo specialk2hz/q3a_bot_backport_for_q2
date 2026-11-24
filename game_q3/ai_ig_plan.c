@@ -36,6 +36,7 @@ of the License, or (at your option) any later version.
 #include "ai_main.h"
 #include "ai_dmq3.h"
 #include "ai_ig.h"
+#include "chars.h"
 #include "../botlib/be_ig_hook.h"
 
 int AAS_AreaRouteToGoalArea(int areanum, vec3_t origin, int goalareanum, int travelflags, int *traveltime, int *reachnum);
@@ -260,6 +261,8 @@ static void IGX_Start(igx_t *x, igpm_t *pm)
 	pm->area = AAS_PointAreaNum(pm->org);
 }
 
+static int IGX_EndUnsafe(igx_t *x, igpm_t *pm);
+
 static void IGX_Simulate(igx_t *x, igopt_t *o)
 {
 	igpm_t pm;
@@ -351,16 +354,12 @@ static void IGX_Simulate(igx_t *x, igopt_t *o)
 	/* where it ends: the route's time from there */
 	area = pm.area;
 	VectorCopy(pm.org, end);
-	if (!pm.ground && !pm.pad && !pm.teleport) {	/* still in the air: where it comes down */
-		bsp_trace_t tr;
-		vec3_t down, mins = {-16, -16, -24}, maxs = {16, 16, 32};
+	if (!pm.ground && !pm.pad && !pm.teleport && !stop) {	/* still in the air: where it comes down */
+		igpm_t fall = pm;
 
-		VectorCopy(end, down);
-		down[2] -= 1000;
-		BotAI_Trace(&tr, end, mins, maxs, down, x->bs->entitynum, CONTENTS_SOLID | CONTENTS_PLAYERCLIP | CONTENTS_LAVA | CONTENTS_SLIME);
-		if (tr.fraction >= 1 || (tr.contents & (CONTENTS_LAVA | CONTENTS_SLIME))) return;	/* a pit, or lava below */
-		VectorCopy(tr.endpos, end);
-		area = AAS_PointAreaNum(end);
+		if (IGX_EndUnsafe(x, &fall)) return;	/* a pit, or lava below */
+		VectorCopy(fall.org, end);
+		area = fall.area;
 	}
 	if (!area) return;
 	if (area == x->goalarea) tt = 0;
@@ -637,10 +636,9 @@ int IG_Plan(bot_state_t *bs, bot_goal_t *goal, bot_moveresult_t *mr)
 static int IGX_Unsafe(igx_t *x, const vec3_t dir, float speed, int jump, int crouch, float yaw, float pitch)
 {
 	igpm_t pm;
-	vec3_t wish, end, down, mins = {-16, -16, -24}, maxs = {16, 16, 32};
+	vec3_t wish;
 	float fm, sm;
 	int t, half;
-	bsp_trace_t tr;
 
 	IGX_Start(x, &pm);
 	VectorSet(wish, dir[0], dir[1], 0);
@@ -654,12 +652,7 @@ static int IGX_Unsafe(igx_t *x, const vec3_t dir, float speed, int jump, int cro
 		if (pm.everhit & (CONTENTS_LAVA | CONTENTS_SLIME)) return 1;
 		if (pm.pad || pm.teleport) return 0;
 	}
-	if (pm.ground) return 0;
-	VectorCopy(pm.org, end);
-	VectorCopy(end, down);
-	down[2] -= 1000;
-	BotAI_Trace(&tr, end, mins, maxs, down, x->bs->entitynum, CONTENTS_SOLID | CONTENTS_PLAYERCLIP | CONTENTS_LAVA | CONTENTS_SLIME);
-	return tr.fraction >= 1 || (tr.contents & (CONTENTS_LAVA | CONTENTS_SLIME));
+	return IGX_EndUnsafe(x, &pm);
 }
 
 /* Every think, after the AI has made its input (be_interface_q2.c): an input
@@ -749,14 +742,17 @@ void IG_PlanGuard(bot_state_t *bs, bot_input_t *bi)
  * lava below is unsafe. */
 static int IGX_EndUnsafe(igx_t *x, igpm_t *pm)
 {
-	vec3_t down, mins = {-16, -16, -24}, maxs = {16, 16, 32};
-	bsp_trace_t tr;
+	int t;
 
-	if (pm->ground || pm->pad || pm->teleport) return 0;
-	VectorCopy(pm->org, down);
-	down[2] -= 1000;
-	BotAI_Trace(&tr, pm->org, mins, maxs, down, x->bs->entitynum, CONTENTS_SOLID | CONTENTS_PLAYERCLIP | CONTENTS_LAVA | CONTENTS_SLIME);
-	return tr.fraction >= 1 || (tr.contents & (CONTENTS_LAVA | CONTENTS_SLIME));
+	(void)x;
+	/* fly the fall out, up to 2.5 s: a pit's death zone is lava in the
+	 * navigation file (IGPM_Categorize), and it lies near the bottom */
+	IG_PmoveHookRelease(pm);
+	for (t = 0; t < 50 && !pm->ground && !pm->pad && !pm->teleport; t++) {
+		IG_Pmove(pm, 0, 0, 0, 0, 0, 50);
+		if (pm->everhit & (CONTENTS_LAVA | CONTENTS_SLIME)) return 1;
+	}
+	return !pm->ground && !pm->pad && !pm->teleport;
 }
 
 /* The hook out now (fire: or fired now at `anchor` along the flicked view)
@@ -807,5 +803,185 @@ int IG_PlanFireUnsafe(bot_state_t *bs, const vec3_t anchor, int hold)
 int IG_PlanHookUnsafe(bot_state_t *bs, int hold)
 {
 	return IGX_HookUnsafe(bs, NULL, hold);
+}
+
+/* ------------------------------------------------------------- fights */
+
+/* The fight movement (IG-40, in place of BotAttackMove). A railgun fight is
+ * one shot each way, so a dodge is good when it is hard to hit -- fast
+ * across the enemy's line -- and when it PEEKS: in sight of the enemy while
+ * the rail is loaded, out of it while it reloads (Billy: quick-peeking a
+ * corner). Each think, FIGHT_OPTS dodges (strafe either side, angled in, out
+ * or square, with and without a hop; straight in; straight out) are flown
+ * FIGHT_THINKS in Quake II's movement against the enemy where it is now and
+ * costed; lava, slime and pits are out, as everywhere. A dodge is kept for a
+ * random 0.3-0.8 s unless it turns bad, so the bot does not jitter. */
+#define FIGHT_THINKS	8
+#define FIGHT_RELOAD	1.5f	/* the railgun's cycle, s (libvar ig_planreload) */
+
+static struct {
+	int		opt;			/* the dodge under way, -1 none */
+	float	until;			/* kept until then */
+	float	lastshot;
+	int		shooting;
+} igf[MAX_CLIENTS];
+
+typedef struct {
+	vec3_t	dir;
+	int		hop;
+	float	cost;
+	int		ok;
+} igfopt_t;
+
+static int IGX_Sees(bot_state_t *bs, const vec3_t eye, const vec3_t target)
+{
+	bsp_trace_t tr;
+	vec3_t a, b;
+
+	VectorCopy(eye, a);
+	VectorCopy(target, b);
+	BotAI_Trace(&tr, a, NULL, NULL, b, bs->entitynum, CONTENTS_SOLID | CONTENTS_PLAYERCLIP);
+	return tr.fraction >= 1;
+}
+
+static float igf_lat, igf_peek;	/* tuning (libvars ig_pflat, ig_pfpeek), read once a think */
+
+static void IGX_FightSim(igx_t *x, igfopt_t *o, const vec3_t enemyeye, float ready, float skill)
+{
+	igpm_t pm;
+	vec3_t eye, line, side, vh;
+	float fm, sm, lat = 0, cost = 0, d, before, after, wallpen = 0;
+	int t, half;
+
+	IGX_Start(x, &pm);
+	o->ok = 0;
+	IGX_Moves(o->dir, x->lastview[YAW], &fm, &sm);
+	for (t = 0; t < FIGHT_THINKS; t++) {
+		VectorSet(vh, pm.vel[0], pm.vel[1], 0);
+		before = VectorLength(vh);
+		pm.blocked = 0;
+		for (half = 0; half < 2; half++)
+			IG_Pmove(&pm, fm, sm, o->hop && t == 0 ? 400 : 0, x->lastview[PITCH], x->lastview[YAW], 50);
+		if (pm.everhit & (CONTENTS_LAVA | CONTENTS_SLIME)) return;
+		if (pm.pad || pm.teleport) return;		/* not mid-fight */
+		VectorSet(vh, pm.vel[0], pm.vel[1], 0);
+		after = VectorLength(vh);
+		if (pm.blocked && before - after > 150) wallpen += 0.05f;
+		/* across the enemy's line: what makes a rail miss */
+		VectorSubtract(enemyeye, pm.org, line);
+		line[2] = 0;
+		d = VectorNormalize(line);
+		VectorSet(side, -line[1], line[0], 0);
+		lat += fabs(DotProduct(vh, side));
+		/* peek: in sight when loaded, out of it when not */
+		VectorCopy(pm.org, eye);
+		eye[2] += pm.ducked ? -2 : 22;
+		if (IGX_Sees(x->bs, eye, enemyeye)) {
+			if (ready > (t + 1) * 0.1f) cost += 0.04f * igf_peek;	/* seen while reloading */
+		} else {
+			if (ready <= (t + 1) * 0.1f) cost += 0.05f;		/* loaded and blind */
+		}
+		/* range: rails reach anywhere, but too close is a coin toss and too far a duel of luck */
+		if (d < 250) cost += 0.02f;
+		else if (d > 1400) cost += 0.01f;
+	}
+	if (IGX_EndUnsafe(x, &pm)) return;
+	lat /= FIGHT_THINKS;
+	cost -= igf_lat * skill * (lat > 450 ? 1.5f : lat / 300);
+	/* the higher ground */
+	d = pm.org[2] - (enemyeye[2] - 22);
+	cost -= 0.03f * (d > 200 ? 1 : d < -200 ? -1 : d / 200);
+	o->cost = cost + wallpen;
+	o->ok = 1;
+}
+
+int IG_PlanFight(bot_state_t *bs)
+{
+	igx_t x;
+	igfopt_t opts[16];
+	aas_entityinfo_t enemy, self;
+	vec3_t fwd, side, enemyeye, eye;
+	float skill, jumper, ready, best = 1e9f, total, r, w[16];
+	int c = bs->client, n = 0, i, s, pick, b = -1;
+	static const float angles[3] = {0, 45, -45};	/* square, angled in, angled out */
+
+	if (!IG_PlanOn() || c < 0 || c >= MAX_CLIENTS || BotIsDead(bs) || bs->enemy < 0) return 0;
+	if (!LibVarValue("ig_planfight", "0")) return 0;	/* off: even with stock fights head to head (IG-40) */
+	/* testing: only odd client numbers fight with the planner, so the two
+	 * fight movements meet in the same matches (ig_pfodd 1) */
+	if (LibVarValue("ig_pfodd", "0") && !(c & 1)) return 0;
+	if (bs->attackchase_time > FloatTime()) return 0;		/* chasing: the route's */
+	skill = trap_Characteristic_BFloat(bs->character, CHARACTERISTIC_ATTACK_SKILL, 0, 1);
+	jumper = trap_Characteristic_BFloat(bs->character, CHARACTERISTIC_JUMPER, 0, 1);
+	if (skill < 0.2f) return 0;
+	Com_Memset(&x, 0, sizeof(x));
+	x.bs = bs;
+	VectorCopy(bs->cur_ps.origin, eye);
+	eye[2] += bs->cur_ps.viewheight;
+	x.hook = IG_OwnHook(eye, VectorLength(bs->cur_ps.velocity), x.hookpos);
+	if (x.hook) return 0;									/* a fight hook: its own code */
+	if (AAS_PointContents(bs->origin) & (CONTENTS_WATER | CONTENTS_LAVA | CONTENTS_SLIME)) return 0;
+	VectorCopy(bs->viewangles, x.lastview);
+	if (x.lastview[PITCH] > 180) x.lastview[PITCH] -= 360;
+
+	/* the rail's reload: from this bot's own shots */
+	BotEntityInfo(c, &self);
+	if (EntityIsShooting(&self) && !igf[c].shooting) igf[c].lastshot = FloatTime();
+	igf[c].shooting = EntityIsShooting(&self);
+	if (igf[c].lastshot > FloatTime()) igf[c].lastshot = 0;		/* a new map */
+	ready = igf[c].lastshot + LibVarValue("ig_planreload", "1.5") - FloatTime();
+	if (ready < 0) ready = 0;
+
+	BotEntityInfo(bs->enemy, &enemy);
+	if (!enemy.valid) return 0;
+	VectorCopy(enemy.origin, enemyeye);
+	enemyeye[2] += 22;
+	VectorSubtract(enemy.origin, bs->origin, fwd);
+	fwd[2] = 0;
+	if (VectorNormalize(fwd) < 1) return 0;
+
+	igf_lat = LibVarValue("ig_pflat", "0.12");
+	igf_peek = LibVarValue("ig_pfpeek", "1");
+	for (s = -1; s <= 1; s += 2)
+		for (i = 0; i < 3; i++) {
+			float a = DEG2RAD(90 * s + angles[i] * s);
+
+			VectorSet(side, fwd[0] * cos(a) - fwd[1] * sin(a), fwd[0] * sin(a) + fwd[1] * cos(a), 0);
+			VectorCopy(side, opts[n].dir); opts[n].hop = 0; n++;
+			if (LibVarValue("ig_pfhop", "1")) { VectorCopy(side, opts[n].dir); opts[n].hop = 1; n++; }
+		}
+	VectorCopy(fwd, opts[n].dir); opts[n].hop = 0; n++;
+	VectorScale(fwd, -1, opts[n].dir); opts[n].hop = 0; n++;
+
+	for (i = 0; i < n; i++) {
+		IGX_FightSim(&x, &opts[i], enemyeye, ready, skill);
+		if (!opts[i].ok) continue;
+		if (i == igf[c].opt && FloatTime() < igf[c].until) opts[i].cost -= 0.15f;	/* keep it a while */
+		if (opts[i].cost < best) { best = opts[i].cost; b = i; }
+	}
+	if (b < 0) return 0;		/* nothing safe: the stock move, which the guard then turns */
+	if (b == igf[c].opt && FloatTime() < igf[c].until) {
+		pick = b;
+	} else {
+		/* a fair pick among the near-best; a jumper likes the hops */
+		total = 0;
+		for (i = 0; i < n; i++) {
+			w[i] = opts[i].ok && opts[i].cost <= best + PLAN_MARGIN ? (opts[i].hop ? 0.3f + jumper : 1) : 0;
+			total += w[i];
+		}
+		r = random() * total;
+		for (pick = b, i = 0; i < n; i++) {
+			if (w[i] <= 0) continue;
+			if (r < w[i]) { pick = i; break; }
+			r -= w[i];
+		}
+		igf[c].opt = pick;
+		igf[c].until = FloatTime() + 0.3f + random() * 0.5f;
+	}
+	EA_IGMove(c, opts[pick].dir, 400, opts[pick].hop && bs->cur_ps.groundEntityNum != ENTITYNUM_NONE, 0);
+	igp_state[c].steered = FloatTime();
+	if (trap_Cvar_VariableIntegerValue("ig_plandebug") == 2)
+		BotAI_Print(PRT_MESSAGE, "igfight %d opt %d hop %d cost %.2f best %.2f ready %.2f\n", c, pick, opts[pick].hop, opts[pick].cost, best, ready);
+	return 1;
 }
 
