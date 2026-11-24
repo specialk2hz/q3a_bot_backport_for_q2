@@ -39,6 +39,7 @@ int IG_ClimbAimSpot(int reachnum, vec3_t spot, float *oz);
 int IG_ClimbAimPick(int client, int reachnum);
 int IG_ClimbLookDir(int client, const vec3_t origin, vec3_t dir);
 int IG_ClimbAimLetGoArc(int client, const vec3_t origin, const vec3_t velocity);
+int IG_ClimbAimOverhead(int client);
 int IG_ClimbLand(int client, const vec3_t origin, const vec3_t velocity, const vec3_t viewangles, const vec3_t viewoffset,
 				 int grounded, int hooked, vec3_t movedir, vec3_t view, int *fire, int *release);
 struct aas_reachability_s;

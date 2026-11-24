@@ -1156,6 +1156,95 @@ int IG_LavaEscape(bot_state_t *bs)
 static struct { int on; float side; int hops; int stale; vec3_t tdir; } ig_strafe[MAX_CLIENTS];
 static float Distance2D(const vec3_t a, const vec3_t b) { return sqrt((a[0]-b[0])*(a[0]-b[0]) + (a[1]-b[1])*(a[1]-b[1])); }
 
+
+/* IG-38: strafe planning (libvar ig_strafeplan, default 0). The chain used to
+ * check only a straight corridor along its own line; at speed it hopped into
+ * what came after: a turn it could not carve, a doorway narrower than its
+ * line, a lava edge (Billy: q2rdm11's big lava room -- "they should be able to
+ * determine if they should continue strafe jumping or not with proper
+ * planning"). IG_StrafePlan reads the route ahead (points at IG_PLAN_N
+ * lookaheads) and finds the distance along it to the first of:
+ *   a TURN: the route's heading more than IG_PLAN_TURN degrees off the
+ *     bot's own line;
+ *   a NARROW gap: the path clear for the player's box but not for one
+ *     IG_PLAN_GAP units wider each side (a doorway, a frame sticking out);
+ *   LAVA or slime under or within IG_PLAN_LAVA units beside the path.
+ * A chain starts only with IG_PLAN_RUNWAY clear, and keeps hopping only while
+ * the first problem is beyond what its speed covers in IG_PLAN_REACT seconds
+ * (plus a margin): otherwise it lands, friction slows it, the route takes the
+ * turn or the door at a run, and the chain starts again on the next runway. */
+#define IG_PLAN_TURN    50
+#define IG_PLAN_GAP     20
+#define IG_PLAN_LAVA    96
+#define IG_PLAN_RUNWAY  400
+#define IG_PLAN_REACT   0.5f
+#define IG_PLAN_MARGIN  64
+static const float ig_planlook[] = { 150, 300, 450, 600, 800 };
+#define IG_PLAN_N ((int) (sizeof(ig_planlook) / sizeof(ig_planlook[0])))
+
+static int IG_StrafePlanOn(void) { return trap_Cvar_VariableIntegerValue("ig_strafeplan") != 0; }
+
+/* lava under p, or beside it within IG_PLAN_LAVA */
+static int IG_PlanLava(bot_state_t *bs, const vec3_t p, const vec3_t dir)
+{
+	vec3_t q, down, side;
+	bsp_trace_t tr;
+	int k;
+
+	VectorSet(side, -dir[1], dir[0], 0);
+	for (k = -1; k <= 1; k++) {
+		VectorMA(p, k * IG_PLAN_LAVA, side, q);
+		VectorCopy(q, down);
+		down[2] -= 300;
+		BotAI_Trace(&tr, q, NULL, NULL, down, bs->entitynum, MASK_SOLID | IG_LIQUIDS);
+		if (!tr.startsolid && tr.fraction < 1 && (tr.contents & IG_LIQUIDS)) return 1;
+	}
+	return 0;
+}
+
+/* the distance along the route to its first problem (IG_PLAN_RUNWAY * 2 if none
+ * within the lookahead), and why */
+static float IG_StrafePlan(bot_state_t *bs, bot_goal_t *goal, const vec3_t heading, const char **why)
+{
+	vec3_t prev, pt, seg, mins = { -16, -16, -24 }, maxs = { 16, 16, 32 }, wmins, wmaxs, flat, q;
+	bsp_trace_t tr, wtr;
+	float along = 0, len, t;
+	int i;
+
+	*why = "clear";
+	VectorCopy(bs->origin, prev);
+	VectorSet(wmins, mins[0] - IG_PLAN_GAP, mins[1] - IG_PLAN_GAP, mins[2]);
+	VectorSet(wmaxs, maxs[0] + IG_PLAN_GAP, maxs[1] + IG_PLAN_GAP, maxs[2]);
+	for (i = 0; i < IG_PLAN_N; i++) {
+		if (!trap_BotMovementViewTarget(bs->ms, goal, bs->tfl, ig_planlook[i], pt)) break;
+		VectorSubtract(pt, prev, seg);
+		seg[2] = 0;
+		len = VectorNormalize(seg);
+		if (len < 8) continue;
+		/* a turn off the bot's own line */
+		if (DotProduct(seg, heading) < cos(DEG2RAD(IG_PLAN_TURN))) { *why = "turn"; return along; }
+		/* a gap the box passes but a wider one does not (a step up from the
+		 * floor, so stairs and slopes do not read as walls) */
+		prev[2] += 18; pt[2] += 18;
+		BotAI_Trace(&tr, prev, mins, maxs, pt, bs->entitynum, MASK_SOLID | CONTENTS_PLAYERCLIP);
+		BotAI_Trace(&wtr, prev, wmins, wmaxs, pt, bs->entitynum, MASK_SOLID | CONTENTS_PLAYERCLIP);
+		prev[2] -= 18; pt[2] -= 18;
+		if (!wtr.startsolid && wtr.fraction < 1 && (tr.fraction >= 1 || tr.fraction > wtr.fraction + 0.05f)) {
+			*why = "narrow";
+			return along + wtr.fraction * len;
+		}
+		/* lava under or beside the path */
+		VectorCopy(seg, flat);
+		for (t = 48; t <= len; t += 48) {
+			VectorMA(prev, t, flat, q);
+			if (IG_PlanLava(bs, q, flat)) { *why = "lava"; return along + t; }
+		}
+		along += len;
+		VectorCopy(pt, prev);
+	}
+	return along > IG_PLAN_RUNWAY ? IG_PLAN_RUNWAY * 2 : along + IG_PLAN_RUNWAY * 2;
+}
+
 static void IG_StrafeJump(bot_state_t *bs, bot_goal_t *goal, bot_moveresult_t *mr)
 {
 	int c = bs->client;
@@ -1202,6 +1291,17 @@ static void IG_StrafeJump(bot_state_t *bs, bot_goal_t *goal, bot_moveresult_t *m
 			: (mr->traveltype & TRAVELTYPE_MASK) == TRAVEL_WALK &&
 			  !(mr->flags & (MOVERESULT_MOVEMENTVIEWSET | MOVERESULT_WAITING | MOVERESULT_ONTOPOFOBSTACLE)) &&
 			  speed >= IG_STRAFE_START && DotProduct(v, tdir) >= 0.7f && IG_SafeCorridor(bs, tdir, 500);
+		/* IG-38: plan ahead -- a runway to start, room to keep going */
+		if (go && IG_StrafePlanOn()) {
+			const char *why;
+			float room = IG_StrafePlan(bs, goal, ig_strafe[c].on ? v : tdir, &why);
+			float need = ig_strafe[c].on ? speed * IG_PLAN_REACT + IG_PLAN_MARGIN : IG_PLAN_RUNWAY;
+			if (room < need) {
+				BotAI_Print(PRT_MESSAGE, "ig: strafe plan %d %s %s at %.0f need %.0f speed %.0f\n", c,
+							ig_strafe[c].on ? "stop" : "wait", why, room, need, speed);
+				go = 0;
+			}
+		}
 		if (!go) {
 			if (ig_strafe[c].on) BotAI_Print(PRT_MESSAGE, "ig: strafe end %d ground hops %d speed %.0f dot %.2f tdist %.0f travel %d flags %d safe %d\n", c, ig_strafe[c].hops, speed,
 				DotProduct(v, tdir), Distance2D(target, bs->origin), mr->traveltype & TRAVELTYPE_MASK, mr->flags, IG_SafeCorridor(bs, tdir, 300));

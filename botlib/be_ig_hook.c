@@ -569,6 +569,7 @@ int IG_HighGround(int max, int *areas, vec3_t *points)
 
 /* Called once the AAS file is loaded, before the routing is initialised. */
 static void IG_ClimbAimReset(void);
+static void IG_ClimbTableAtLoad(void);
 void IG_AdjustGrappleCosts(void)
 {
 	int i, n = 0, nodrop = 0, climbonly;
@@ -578,6 +579,7 @@ void IG_AdjustGrappleCosts(void)
 
 	ig_hgcount = -1;    /* a new map: its high ground is worked out on first use */
 	IG_ClimbAimReset(); /* IG-36: per-route climb aims are the old map's */
+	IG_ClimbTableAtLoad(); /* IG-36: the map's climb table, before the routing */
 	free(ig_blocked);   /* libc, not the botlib's pools: it outlives nothing */
 	ig_blocked = NULL;
 	ig_blockedsize = 0;
@@ -668,7 +670,7 @@ int IG_PadFlight(int client, vec3_t end)
 
 typedef struct
 {
-	unsigned char done, hasframe, hasfloor;
+	unsigned char done, hasframe, hasfloor;   /* hasframe 2: over the spot (ceiling or sky) */
 	unsigned char usebspc;       /* the map's climb table says bspc's anchor lands better here */
 	float oz;                    /* the landing floor, in origin space */
 	vec3_t spot, frame, floor;
@@ -696,6 +698,7 @@ void IG_ClimbAimForce(int client, int on)
 {
 	if (client >= 0 && client < MAX_CLIENTS) ig_caforce[client] = on;
 }
+static int ig_caover[MAX_CLIENTS];   /* IG-36: this climb hooks over the landing (ceiling or sky) */
 /* IG-37: a new try: nothing of the last climb's landing carries over */
 static int ig_clphase[MAX_CLIENTS];
 void IG_ClimbAimClear(int client)
@@ -704,6 +707,7 @@ void IG_ClimbAimClear(int client)
 	ig_capick[client] = 0;
 	ig_casteer[client] = 0;
 	ig_clphase[client] = 0;
+	ig_caover[client] = 0;
 }
 
 void IG_DrillSetActive(int client, int on)
@@ -823,12 +827,15 @@ static int IG_FrontFlat(const vec3_t eye, const bsp_trace_t *hit, const vec3_t f
 	float sx, sy;
 
 	/* faces the bot: its normal points back at the eye, horizontally (a side
-	 * face of a frame that sticks out looks across the climb, not at it) */
-	VectorSet(d, eye[0] - hit->endpos[0], eye[1] - hit->endpos[1], 0);
-	VectorNormalize(d);
-	VectorSet(p, hit->plane.normal[0], hit->plane.normal[1], 0);
-	if (DotProduct(p, d) < IG_FACE_DOT) return 0;
-	(void) fdir;
+	 * face of a frame that sticks out looks across the climb, not at it).
+	 * fdir NULL: no facing test (a ceiling over the landing) */
+	if (fdir)
+	{
+		VectorSet(d, eye[0] - hit->endpos[0], eye[1] - hit->endpos[1], 0);
+		VectorNormalize(d);
+		VectorSet(p, hit->plane.normal[0], hit->plane.normal[1], 0);
+		if (DotProduct(p, d) < IG_FACE_DOT) return 0;
+	}
 	/* flat: four points around it on its plane hit the same plane */
 	CrossProduct(hit->plane.normal, up, t1);
 	if (VectorNormalize(t1) < 0.1f) VectorSet(t1, 1, 0, 0);
@@ -939,6 +946,54 @@ static void IG_ClimbAimCompute(int reachnum, const aas_reachability_t *reach)
 			if (score > best) { best = score; VectorCopy(hit, ca->frame); ca->hasframe = 1; }
 		}
 	}
+	/* No frame: an anchor OVER the spot -- a flat ceiling, or the sky where
+	 * the server allows sky hooks (ig_hooksky) -- so the pull lifts the bot
+	 * straight up onto the middle of the landing. Billy: bots climbing to
+	 * q2rdm11's railgun overlook hooked the side wall and slid into the lava;
+	 * they should hook "near/above where the railgun is placed". */
+	if (!ca->hasframe)
+	{
+		static const float ov[][2] = { {0, 0}, {24, 0}, {-24, 0}, {0, 24}, {0, -24}, {48, 0}, {-48, 0}, {0, 48}, {0, -48} };
+		int sky = LibVarValue("ig_hooksky", "0") != 0, k2;
+		float hd;
+
+		best = -99999;
+		for (k2 = 0; k2 < (int) (sizeof(ov) / sizeof(ov[0])); k2++)
+		{
+			vec3_t base;
+			bsp_trace_t up, see;
+
+			/* what is straight above this point of the landing ... */
+			VectorSet(base, ca->spot[0] + ov[k2][0], ca->spot[1] + ov[k2][1], oz + 8);
+			VectorSet(t, base[0], base[1], oz + 1200);
+			up = AAS_Trace(base, NULL, NULL, t, ENTITYNUM_NONE, CONTENTS_SOLID);
+			if (up.startsolid || up.fraction >= 1) continue;
+			VectorCopy(up.endpos, hit);
+			hit[2] -= 1;
+			/* ... and can the bot's hook reach it from the start */
+			VectorSubtract(hit, eye, d);
+			VectorMA(eye, 1.02f, d, t);
+			see = AAS_Trace(eye, NULL, NULL, t, ENTITYNUM_NONE, CONTENTS_SOLID);
+			VectorSubtract(see.endpos, hit, d);
+			if (LibVarValue("ig_movedebug", "0") >= 3)
+				botimport.Print(PRT_MESSAGE, "ig: over %d above %.0f %.0f %.0f sky %d seen-miss %.0f pull %d\n", reachnum,
+								hit[0], hit[1], hit[2], (up.surface.flags & SURF_SKY) != 0, VectorLength(d), IG_PullLands(reach->start, hit, oz));
+			if (see.startsolid || VectorLength(d) > 16) continue;
+			if (hit[2] < oz + 60) continue;
+			hd = sqrt(ov[k2][0] * ov[k2][0] + ov[k2][1] * ov[k2][1]);
+			if (up.surface.flags & SURF_SKY)
+			{
+				if (!sky) continue;
+			}
+			else
+			{   /* a ceiling: flat around the point */
+				if (!IG_FrontFlat(eye, &up, NULL)) continue;
+			}
+			if (!IG_PullLands(reach->start, hit, oz)) continue;
+			score = -hd;
+			if (score > best) { best = score; VectorCopy(hit, ca->frame); ca->hasframe = 2; }
+		}
+	}
 	/* the floor at the spot, if it can be seen from the start */
 	VectorCopy(ca->spot, t);
 	t[2] = oz - 24;
@@ -966,13 +1021,17 @@ static void IG_ClimbAimCompute(int reachnum, const aas_reachability_t *reach)
  * climb drill by the server repo's tools/climb-table.py): the routes where
  * bspc's anchor landed clearly more often than the frame anchor. Text:
  *   reachsize <n>      the .aas the drill ran on; another .aas ignores the table
- *   bspc <reachnum>    one per line
+ *   bspc <reachnum>    keeps bspc's anchor
+ *   off <reachnum>     never landed in the drill, with either anchor: taken out
+ *                      at map load (Billy: bots hooked the side wall below
+ *                      q2rdm11's railgun overlook and slid into the lava twice
+ *                      in a row -- route 3172, 0 of 18 drilled tries landed)
  * Without a table every route takes the frame anchor (where it has one). */
 static void IG_ClimbTableLoad(void)
 {
 	char path[MAX_QPATH], *buf, *line, *next;
 	fileHandle_t fp;
-	int len, n = 0, size = -1, r;
+	int len, n = 0, off = 0, size = -1, r;
 
 	Com_sprintf(path, sizeof(path), "maps/%s.climbs", aasworld.mapname);
 	len = botimport.FS_FOpenFile(path, &fp, FS_READ);
@@ -991,25 +1050,41 @@ static void IG_ClimbTableLoad(void)
 			ig_climb[r].usebspc = 1;
 			n++;
 		}
+		if (sscanf(line, "off %d", &r) == 1 && size == aasworld.reachabilitysize && r > 0 && r < aasworld.reachabilitysize &&
+			(aasworld.reachability[r].traveltype & TRAVELTYPE_MASK) == TRAVEL_GRAPPLEHOOK)
+		{   /* before the routing is set up (IG_AdjustGrappleCosts): no cache to clear */
+			aasworld.reachability[r].traveltype = (aasworld.reachability[r].traveltype & ~TRAVELTYPE_MASK) | TRAVEL_INVALID;
+			off++;
+		}
 	}
 	free(buf);
 	if (size != aasworld.reachabilitysize)
 		botimport.Print(PRT_MESSAGE, "ig: %s is for another navigation file (%d routes, this one %d), ignored\n", path, size, aasworld.reachabilitysize);
 	else
-		botimport.Print(PRT_MESSAGE, "ig: %s: %d climb route(s) keep bspc's anchor\n", path, n);
+		botimport.Print(PRT_MESSAGE, "ig: %s: %d climb route(s) keep bspc's anchor, %d never land: taken out\n", path, n, off);
+}
+
+static int IG_ClimbArray(void)
+{
+	if (ig_climb && ig_climbsize == aasworld.reachabilitysize) return 1;
+	free(ig_climb);
+	ig_climbsize = aasworld.reachabilitysize;
+	ig_climb = calloc(ig_climbsize, sizeof(*ig_climb));
+	if (!ig_climb) { ig_climbsize = 0; return 0; }
+	if (LibVarValue("ig_climbtable", "1")) IG_ClimbTableLoad();
+	return 1;
+}
+
+/* at map load, with the climb aim on, so "off" routes are out before routing */
+static void IG_ClimbTableAtLoad(void)
+{
+	if (aasworld.reachabilitysize > 0 && LibVarValue("ig_climbaim", "0")) IG_ClimbArray();
 }
 
 static ig_climbaim_t *IG_ClimbAimGet(int reachnum, const aas_reachability_t *reach)
 {
 	if (reachnum <= 0 || reachnum >= aasworld.reachabilitysize) return NULL;
-	if (!ig_climb || ig_climbsize != aasworld.reachabilitysize)
-	{
-		free(ig_climb);
-		ig_climbsize = aasworld.reachabilitysize;
-		ig_climb = calloc(ig_climbsize, sizeof(*ig_climb));
-		if (!ig_climb) { ig_climbsize = 0; return NULL; }
-		if (LibVarValue("ig_climbtable", "1")) IG_ClimbTableLoad();
-	}
+	if (!IG_ClimbArray()) return NULL;
 	if (!ig_climb[reachnum].done) IG_ClimbAimCompute(reachnum, reach);
 	return &ig_climb[reachnum];
 }
@@ -1042,6 +1117,7 @@ int IG_ClimbAimReach(int client, int reachnum, const aas_reachability_t *reach, 
 	if (ca->usebspc && ig_caforce[client] < 0) return 0;
 	if (mode == 2 || !ca->hasframe)
 	{   /* bspc's anchor, IG-36's landing */
+		ig_caover[client] = 0;
 		ig_capick[client] = reachnum + 1;
 		ig_cafloor[client] = -1;
 		ig_catime[client] = AAS_Time();
@@ -1059,6 +1135,7 @@ int IG_ClimbAimReach(int client, int reachnum, const aas_reachability_t *reach, 
 	ig_catime[client] = AAS_Time();
 	*out = *reach;
 	VectorCopy(ig_cafloor[client] ? ca->floor : ca->frame, out->end);
+	ig_caover[client] = !ig_cafloor[client] && ca->hasframe == 2;
 	VectorCopy(ca->spot, ig_caspot[client]);
 	ig_caoz[client] = ca->oz;
 	ig_casteer[client] = AAS_Time() + IG_CA_STEER;
@@ -1131,10 +1208,18 @@ int IG_ClimbAimLetGoArc(int client, const vec3_t origin, const vec3_t velocity)
  * it the bot let go at the threshold with the pull's speed and flew off the
  * side; holding on to the stuck rule (0.6 s) was "too long" (Billy). */
 #define IG_STALL_LETGO 150
+int IG_ClimbAimOverhead(int client)
+{
+	return client >= 0 && client < MAX_CLIENTS && ig_capick[client] && ig_caover[client];
+}
+
+/* an overhead anchor always holds to the stall: the pull ends under it, over
+ * the middle of the landing, and the bot drops onto it (let go with the pull's
+ * speed, it flew off the far side of the railgun overlook) */
 int IG_ClimbAimHoldStall(int client)
 {
 	if (client < 0 || client >= MAX_CLIENTS || !ig_capick[client]) return 0;
-	return ((int) LibVarValue("ig_climbland", "0") & 8) != 0;
+	return ig_caover[client] || ((int) LibVarValue("ig_climbland", "0") & 8) != 0;
 }
 
 /* let go: the feet over the landing floor's height, with that floor under the

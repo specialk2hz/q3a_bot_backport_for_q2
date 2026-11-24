@@ -3029,7 +3029,7 @@ bot_moveresult_t BotTravel_Grapple(bot_movestate_t *ms, aas_reachability_t *reac
 		/* IG-36: with its own anchor, let go over the landing whatever the hook's
 		 * state -- it bites the frame a little off the aimed point, the latch
 		 * test missed it, and the bot held on at the door (Billy) */
-		if (IG_HookDetect() && ((state == 2 && IG_ClimbLetGo(ms->origin, reach)) || (ig_mine && state && (IG_ClimbAimLetGoArc(ms->client, ms->origin, ms->velocity) || IG_ClimbAimLetGo(ms->client, ms->origin, ms->velocity))))) { dist = 0; ms->lastgrappledist = 0; botimport.Print(PRT_MESSAGE, "ig: climb letgo %d\n", ms->client); } /* IG: IG-32 */
+		if (IG_HookDetect() && ((state == 2 && !(ig_mine == 1 && IG_ClimbAimOverhead(ms->client)) && IG_ClimbLetGo(ms->origin, reach)) || (ig_mine && state && (IG_ClimbAimLetGoArc(ms->client, ms->origin, ms->velocity) || IG_ClimbAimLetGo(ms->client, ms->origin, ms->velocity))))) { dist = 0; ms->lastgrappledist = 0; botimport.Print(PRT_MESSAGE, "ig: climb letgo %d\n", ms->client); } /* IG: IG-32 */
 		if (state && dist < 48)
 		{
 			if (ms->lastgrappledist - dist < 1)
