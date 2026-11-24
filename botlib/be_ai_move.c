@@ -2989,7 +2989,8 @@ bot_moveresult_t BotTravel_Grapple(bot_movestate_t *ms, aas_reachability_t *reac
 	int ig_mine = 0;
 
 	IG_GrappleTravelNote(ms->client); /* IG: the hook watchdog (IG-6) */
-	if (IG_HookDetect() && IG_ClimbAimReach(ms->client, ms->lastreachnum, reach, &ig_reach)) { reach = &ig_reach; ig_mine = 1; } /* IG: IG-36 */
+	if (IG_HookDetect()) ig_mine = IG_ClimbAimReach(ms->client, ms->lastreachnum, reach, &ig_reach); /* IG: IG-36, 1 frame anchor, 2 landing only */
+	if (ig_mine == 1) reach = &ig_reach;
 #ifdef DEBUG_GRAPPLE
 	static int debugline;
 	if (!debugline) debugline = botimport.DebugLineCreate();
@@ -3028,7 +3029,7 @@ bot_moveresult_t BotTravel_Grapple(bot_movestate_t *ms, aas_reachability_t *reac
 		/* IG-36: with its own anchor, let go over the landing whatever the hook's
 		 * state -- it bites the frame a little off the aimed point, the latch
 		 * test missed it, and the bot held on at the door (Billy) */
-		if (IG_HookDetect() && ((state == 2 && IG_ClimbLetGo(ms->origin, reach)) || (ig_mine && state && IG_ClimbAimLetGo(ms->client, ms->origin)))) { dist = 0; ms->lastgrappledist = 0; botimport.Print(PRT_MESSAGE, "ig: climb letgo %d\n", ms->client); } /* IG: IG-32 */
+		if (IG_HookDetect() && ((state == 2 && IG_ClimbLetGo(ms->origin, reach)) || (ig_mine && state && (IG_ClimbAimLetGoArc(ms->client, ms->origin, ms->velocity) || IG_ClimbAimLetGo(ms->client, ms->origin, ms->velocity))))) { dist = 0; ms->lastgrappledist = 0; botimport.Print(PRT_MESSAGE, "ig: climb letgo %d\n", ms->client); } /* IG: IG-32 */
 		if (state && dist < 48)
 		{
 			if (ms->lastgrappledist - dist < 1)
@@ -3092,7 +3093,7 @@ bot_moveresult_t BotTravel_Grapple(bot_movestate_t *ms, aas_reachability_t *reac
 		if (!(ms->moveflags & MFL_SWIMMING)) dir[2] = 0;
 		VectorAdd(ms->origin, ms->viewoffset, org);
 		VectorSubtract(reach->end, org, viewdir);
-		if (IG_HookDetect() && !ig_mine) IG_GrappleAim(org, reach->end, ms->viewoffset[2], ms->entitynum, viewdir); /* IG: IG-6; IG-36's anchors are exact */
+		if (IG_HookDetect() && ig_mine != 1) IG_GrappleAim(org, reach->end, ms->viewoffset[2], ms->entitynum, viewdir); /* IG: IG-6; IG-36's anchors are exact */
 		//
 		dist = VectorNormalize(dir);
 		if (IG_HookDetect()) dist = IG_GrappleStartDist(dist); /* IG: IG-6, no running in place */
@@ -3478,6 +3479,29 @@ bot_moveresult_t BotMoveInGoalArea(bot_movestate_t *ms, bot_goal_t *goal)
 // Changes Globals:		-
 //===========================================================================
 
+/* IG-36: after a climb lets go, until it lands (IG_ClimbLand): 1 when it
+ * moved the bot this think */
+static int IG_ClimbLandMove(bot_movestate_t *ms, bot_moveresult_t *result)
+{
+	vec3_t movedir, view;
+	int fire, release;
+
+	if (!IG_ClimbLand(ms->client, ms->origin, ms->velocity, ms->viewangles, ms->viewoffset,
+					  (ms->moveflags & (MFL_ONGROUND|MFL_SWIMMING|MFL_AGAINSTLADDER)) != 0,
+					  (ms->moveflags & MFL_ACTIVEGRAPPLE) != 0, movedir, view, &fire, &release))
+		return 0;
+	if (fire) EA_Command(ms->client, cmd_grappleon->string);
+	if (release) EA_Command(ms->client, cmd_grappleoff->string);
+	if (VectorLength(movedir) > 0.5f)
+	{
+		EA_Move(ms->client, movedir, 400);
+		VectorCopy(movedir, result->movedir);
+	}
+	VectorCopy(view, result->ideal_viewangles);
+	result->flags |= MOVERESULT_MOVEMENTVIEW;
+	return 1;
+}
+
 /* IG-37: the climb drill (libvar ig_drill, default 0). One bot -- the first
  * that moves while it is on -- is put at a hook-climb route's start (the game
  * places it, "igdrillpos"), climbs it, lands, and the outcome is logged
@@ -3603,11 +3627,19 @@ static int IG_Drill(bot_movestate_t *ms, bot_moveresult_t *result)
 			igdr.idx++; igdr.tryn = 0;
 			return 1;
 		}
-		{
-			int am = (int) LibVarValue("ig_drillaim", "2");
-			igdr.aim = am == 2 ? igdr.tryn % 2 : am;
+		{   /* ig_drillaim: the aims to take in turn, e.g. "0 1 2" (0 bspc, 1 frame, 2 bspc + landing) */
+			int aims[8], n = 0;
+			char *s = LibVarGetString("ig_drillaim");
+			while (s && *s && n < 8)
+			{
+				while (*s == ' ') s++;
+				if (*s >= '0' && *s <= '9') aims[n++] = *s - '0';
+				while (*s && *s != ' ') s++;
+			}
+			igdr.aim = n ? aims[igdr.tryn % n] : 0;
 		}
 		IG_ClimbAimForce(ms->client, igdr.aim);
+		IG_ClimbAimClear(ms->client);
 		VectorSubtract(r->end, r->start, dir);
 		vectoangles(dir, ang);
 		/* one argument: the command reaches the game with its first argument only */
@@ -3656,18 +3688,13 @@ static int IG_Drill(bot_movestate_t *ms, bot_moveresult_t *result)
 		/* the higher AI sets MFL_ONGROUND from the player state (BotSetupForMovement) */
 		if (now - igdr.trel > 0.15f && (ms->moveflags & MFL_ONGROUND))
 		{
+			IG_ClimbLandMove(ms, result);   /* lets go of a ground hook */
 			IG_DrillOutcome(ms, NULL);
 			return 1;
 		}
 		if (now - igdr.trel > 3) { IG_DrillOutcome(ms, NULL); return 1; }
-		/* in the air: IG-36's steering when that aim is on, else nothing */
-		if (IG_ClimbSteer(ms->client, ms->origin, 0, 0, result->movedir))
-			EA_Move(ms->client, result->movedir, 400);
-		if (IG_ClimbLookDir(ms->client, ms->origin, dir))
-		{
-			Vector2Angles(dir, result->ideal_viewangles);
-			result->flags |= MOVERESULT_MOVEMENTVIEW;
-		}
+		/* in the air: IG-36's landing when that aim is on, else nothing */
+		IG_ClimbLandMove(ms, result);
 		return 1;
 	case IG_DR_PAUSE:
 		if (now - igdr.t0 < LibVarValue("ig_drillpause", "0.3")) return 1;
@@ -3837,13 +3864,8 @@ void BotMoveToGoal(bot_moveresult_t *result, int movestate, bot_goal_t *goal, in
 	//drag the bot along the ground, and the on-ground arm then re-routes from the
 	//new area and drops the hook. While its hook is out, it travels as if in the air.
 	if (IG_HookDetect() && (ms->moveflags & MFL_ACTIVEGRAPPLE)) ms->moveflags &= ~MFL_ONGROUND; /* IG: */
-	//IG: IG-36, after a climb lets go: air strafe to the middle of the landing
-	if (IG_HookDetect() && IG_ClimbSteer(ms->client, ms->origin, (ms->moveflags & (MFL_ONGROUND|MFL_SWIMMING|MFL_AGAINSTLADDER)) != 0,
-										 (ms->moveflags & MFL_ACTIVEGRAPPLE) != 0, result->movedir))
-	{
-		EA_Move(ms->client, result->movedir, 400);
-		return;
-	}
+	//IG: IG-36, after a climb lets go: to the middle of the landing (air strafe / grapple down)
+	if (IG_HookDetect() && IG_ClimbLandMove(ms, result)) return;
 	//if the bot is on the ground, swimming or against a ladder
 	if (ms->moveflags & (MFL_ONGROUND|MFL_SWIMMING|MFL_AGAINSTLADDER))
 	{

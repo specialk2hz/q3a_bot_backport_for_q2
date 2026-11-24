@@ -682,9 +682,11 @@ static vec3_t ig_caspot[MAX_CLIENTS];
 static float ig_caoz[MAX_CLIENTS];
 static float ig_casteer[MAX_CLIENTS];    /* steer to the spot until */
 
+/* 0 off, 1 the frame anchor, 2 bspc's anchor with the landing (look ahead, let
+ * go over the landing, air strafe / grapple down to its middle) */
 int IG_ClimbAimOn(void)
 {
-	return LibVarValue("ig_climbaim", "0") != 0;
+	return (int) LibVarValue("ig_climbaim", "0");
 }
 
 /* IG-37: the drill decides per try; -1 = the libvar */
@@ -693,6 +695,16 @@ void IG_ClimbAimForce(int client, int on)
 {
 	if (client >= 0 && client < MAX_CLIENTS) ig_caforce[client] = on;
 }
+/* IG-37: a new try: nothing of the last climb's landing carries over */
+static int ig_clphase[MAX_CLIENTS];
+void IG_ClimbAimClear(int client)
+{
+	if (client < 0 || client >= MAX_CLIENTS) return;
+	ig_capick[client] = 0;
+	ig_casteer[client] = 0;
+	ig_clphase[client] = 0;
+}
+
 void IG_DrillSetActive(int client, int on)
 {
 	if (client < 0 || client >= MAX_CLIENTS) return;
@@ -920,17 +932,28 @@ int IG_ClimbAimSpot(int reachnum, vec3_t spot, float *oz)
 	return 1;
 }
 
-/* BotTravel_Grapple's route with the anchor this climb uses; 0: bspc's own */
+/* BotTravel_Grapple's route with the anchor this climb uses: 1 the frame
+ * anchor (in out), 2 bspc's anchor but the landing is IG-36's, 0 neither */
 int IG_ClimbAimReach(int client, int reachnum, const aas_reachability_t *reach, aas_reachability_t *out)
 {
 	ig_climbaim_t *ca;
+	int mode;
 
-	if (client < 0 || client >= MAX_CLIENTS || !IG_ClimbAimFor(client)) return 0;
+	if (client < 0 || client >= MAX_CLIENTS || !(mode = IG_ClimbAimFor(client))) return 0;
 	ca = IG_ClimbAimGet(reachnum, reach);
-	if (!ca) return 0;
-	if (!ca->hasframe) return 0;   /* no frame: bspc's anchor (floor anchors are not for climbs) */
-	/* one pick per climb: the same while the route is in use */
-	if (ig_capick[client] != reachnum + 1 || AAS_Time() - ig_catime[client] > 2 || AAS_Time() < ig_catime[client])
+	if (!ca || (ca->spot[0] == 0 && ca->spot[1] == 0 && ca->spot[2] == 0)) return 0;
+	if (mode == 2 || !ca->hasframe)
+	{   /* bspc's anchor, IG-36's landing */
+		ig_capick[client] = reachnum + 1;
+		ig_cafloor[client] = -1;
+		ig_catime[client] = AAS_Time();
+		VectorCopy(ca->spot, ig_caspot[client]);
+		ig_caoz[client] = ca->oz;
+		ig_casteer[client] = AAS_Time() + IG_CA_STEER;
+		return 2;
+	}
+	/* one pick per climb: the same while the route is in use (and was a frame pick) */
+	if (ig_capick[client] != reachnum + 1 || ig_cafloor[client] < 0 || AAS_Time() - ig_catime[client] > 2 || AAS_Time() < ig_catime[client])
 	{
 		ig_capick[client] = reachnum + 1;
 		ig_cafloor[client] = ca->hasframe ? (ca->hasfloor && random() < IG_CA_FLOORCHANCE) : 0;
@@ -947,14 +970,79 @@ int IG_ClimbAimReach(int client, int reachnum, const aas_reachability_t *reach, 
 /* IG-37: what this climb hooks: -1 bspc's anchor, 0 the frame, 1 the floor */
 int IG_ClimbAimPick(int client, int reachnum)
 {
-	if (client < 0 || client >= MAX_CLIENTS || !IG_ClimbAimFor(client)) return -1;
-	if (ig_capick[client] != reachnum + 1) return -1;
-	return ig_cafloor[client];
+	if (client < 0 || client >= MAX_CLIENTS || !IG_ClimbAimFor(client)) return -2;
+	if (ig_capick[client] != reachnum + 1) return -2;
+	return ig_cafloor[client];   /* -1 bspc's anchor with the landing, 0 frame, 1 floor */
+}
+
+/* the landing floor straight under the body: the player's box dropped down
+ * stops at the floor's height. A map trace, not an AAS one: wedged against
+ * the frame the bot's origin is in no area and the AAS trace starts solid. */
+static int IG_FloorUnder(const vec3_t origin, float oz)
+{
+	vec3_t mins, maxs, end;
+	bsp_trace_t tr;
+
+	AAS_PresenceTypeBoundingBox(PRESENCE_NORMAL, mins, maxs);
+	VectorSet(end, origin[0], origin[1], oz - 4);
+	tr = AAS_Trace((vec_t *) origin, mins, maxs, end, ENTITYNUM_NONE, CONTENTS_SOLID | CONTENTS_PLAYERCLIP);
+	return !tr.startsolid && tr.fraction < 1 && tr.endpos[2] >= oz - 6;
+}
+
+/* IG-36: would the bot, let go now, fly onto the landing? Its arc with
+ * gravity and no steering, in IG_ARC_DT steps to IG_ARC_TIME, the player's
+ * box traced along it: it lands if, coming down, the feet are over the
+ * landing floor's height with that floor straight under them, before the
+ * box hits anything. The earliest moment it holds is the time to let go --
+ * held on to the threshold, the bot left rising at 740 u/s, flew 230 units
+ * over the floor and drifted off the side (Billy: lava-room door). */
+#define IG_ARC_DT    0.05f
+#define IG_ARC_TIME  1.2f
+#define IG_GRAVITY   800
+static int IG_ArcLands(const vec3_t origin, const vec3_t velocity, float oz)
+{
+	vec3_t p, q, end;
+	aas_trace_t tr;
+	float t, vz;
+
+	VectorCopy(origin, p);
+	for (t = IG_ARC_DT; t <= IG_ARC_TIME; t += IG_ARC_DT)
+	{
+		q[0] = origin[0] + velocity[0] * t;
+		q[1] = origin[1] + velocity[1] * t;
+		q[2] = origin[2] + velocity[2] * t - 0.5f * IG_GRAVITY * t * t;
+		tr = AAS_TraceClientBBox(p, q, PRESENCE_NORMAL, -1);
+		if (tr.startsolid || tr.fraction < 1) return 0;
+		vz = velocity[2] - IG_GRAVITY * t;
+		if (vz <= 0 && q[2] >= oz + 2 && IG_FloorUnder(q, oz)) return 1;
+		if (q[2] < oz - 64) return 0;
+		VectorCopy(q, p);
+	}
+	return 0;
+}
+
+int IG_ClimbAimLetGoArc(int client, const vec3_t origin, const vec3_t velocity)
+{
+	if (client < 0 || client >= MAX_CLIENTS || !ig_capick[client]) return 0;
+	if (!((int) LibVarValue("ig_climbland", "0") & 4)) return 0;
+	return IG_ArcLands(origin, velocity, ig_caoz[client]);
+}
+
+/* ig_climbland bit 8: hold on until the pull stalls against the frame (the
+ * wall takes the momentum), then let go at once over the landing. Without
+ * it the bot let go at the threshold with the pull's speed and flew off the
+ * side; holding on to the stuck rule (0.6 s) was "too long" (Billy). */
+#define IG_STALL_LETGO 150
+int IG_ClimbAimHoldStall(int client)
+{
+	if (client < 0 || client >= MAX_CLIENTS || !ig_capick[client]) return 0;
+	return ((int) LibVarValue("ig_climbland", "0") & 8) != 0;
 }
 
 /* let go: the feet over the landing floor's height, with that floor under the
- * bot (not short of the lip), and near the spot */
-int IG_ClimbAimLetGo(int client, const vec3_t origin)
+ * bot (not short of the lip), and near the spot; with bit 8, only once the
+ * pull has stalled (speed under IG_STALL_LETGO) */
+int IG_ClimbAimLetGo(int client, const vec3_t origin, const vec3_t velocity)
 {
 	vec3_t d, p;
 
@@ -962,17 +1050,11 @@ int IG_ClimbAimLetGo(int client, const vec3_t origin)
 
 	if (client < 0 || client >= MAX_CLIENTS || !ig_capick[client]) return 0;
 	if (origin[2] < ig_caoz[client] + 8) return 0;
-	/* the landing floor under the body: the player's box dropped straight
-	 * down stops at the floor's height. Billy: the bot at the lava-room door
+	if (IG_ClimbAimHoldStall(client) && VectorLength(velocity) > IG_STALL_LETGO) return 0;
+	/* the landing floor under the body. Billy: the bot at the lava-room door
 	 * held on too long -- the area test missed the doorway's floor and the
 	 * bot hung at the frame until the stuck rule let go (0.6 s) */
-	VectorSet(p, origin[0], origin[1], ig_caoz[client] - 4);
-	trace = AAS_TraceClientBBox((vec_t *) origin, p, PRESENCE_NORMAL, -1);
-	if (LibVarValue("ig_movedebug", "0") >= 3)
-		botimport.Print(PRT_MESSAGE, "ig: caletgo %d at %.0f %.0f %.0f oz %.0f trace solid %d frac %.2f end z %.0f spot %.0f\n", client,
-						origin[0], origin[1], origin[2], ig_caoz[client], trace.startsolid, trace.fraction, trace.endpos[2],
-						sqrt((ig_caspot[client][0]-origin[0])*(ig_caspot[client][0]-origin[0])+(ig_caspot[client][1]-origin[1])*(ig_caspot[client][1]-origin[1])));
-	if (trace.startsolid || trace.fraction >= 1 || trace.endpos[2] < ig_caoz[client] - 6) return 0;
+	if (!IG_FloorUnder(origin, ig_caoz[client])) return 0;
 	VectorSubtract(ig_caspot[client], origin, d);
 	d[2] = 0;
 	return VectorLength(d) <= IG_CA_LETGO;
@@ -992,11 +1074,121 @@ int IG_ClimbLookDir(int client, const vec3_t origin, vec3_t dir)
 int IG_ClimbSteer(int client, const vec3_t origin, int grounded, int hooked, vec3_t dir)
 {
 	if (client < 0 || client >= MAX_CLIENTS || !IG_ClimbAimFor(client)) return 0;
-	if (!LibVarValue("ig_climbsteer", "1")) return 0;   /* experiment switch (drill) */
 	if (grounded) { ig_casteer[client] = 0; return 0; }
 	if (hooked || ig_casteer[client] <= AAS_Time() || ig_casteer[client] > AAS_Time() + IG_CA_STEER + 1) return 0;
 	VectorSubtract(ig_caspot[client], origin, dir);
 	dir[2] = 0;
 	if (VectorNormalize(dir) < 12) return 0;
+	return 1;
+}
+
+/* IG-36 landing (libvar ig_climbland, bits; default 0 = IG_ClimbSteer's plain
+ * push to the spot). After a climb lets go the bot still flies: at the
+ * lava-room door it let go rising at 750 u/s, went 200 units over the floor
+ * and drifted past the middle. Billy: "air strafe to stay in the middle of
+ * the platform, or grapple down once over the landing zone".
+ *   1 air strafe: wish the velocity that takes it to the spot (brake the
+ *     sideways speed it arrived with, then drift in), looking where it goes;
+ *   2 grapple down: over the landing floor and still IG_CL_HIGH above it,
+ *     look at the floor at the spot and hook it; the pull plants it there
+ *     and it lets go IG_CL_LOW above the floor (or after IG_CL_PULL s).
+ * IG_ClimbLand says what to do this think: a move direction, a view, and
+ * whether to fire or let go of the hook. */
+#define IG_CL_HIGH  48     /* hook down only this far above the landing floor */
+#define IG_CL_LOW   20     /* let go this close above it */
+#define IG_CL_PULL  0.6f
+#define IG_CL_AIM   5      /* degrees off the floor point it may fire */
+#define IG_CL_TIME  0.6f   /* seconds to reach the spot the air strafe plans for */
+
+/* ig_clphase (declared with IG_ClimbAimClear): 0 flying, 1 hooked down, 2 done */
+static float ig_clfire[MAX_CLIENTS];
+static vec3_t ig_clanchor[MAX_CLIENTS];
+
+int IG_ClimbLand(int client, const vec3_t origin, const vec3_t velocity, const vec3_t viewangles, const vec3_t viewoffset,
+				 int grounded, int hooked, vec3_t movedir, vec3_t view, int *fire, int *release)
+{
+	int mode = (int) LibVarValue("ig_climbland", "0");
+	vec3_t d, eye, end, ang, want;
+	aas_trace_t down;
+	bsp_trace_t tr;
+	float oz;
+
+	*fire = *release = 0;
+	VectorClear(movedir);
+	if (client < 0 || client >= MAX_CLIENTS || !IG_ClimbAimFor(client) || !ig_capick[client]) return 0;
+	if (grounded)
+	{
+		if (ig_clphase[client] == 1) *release = 1;
+		ig_casteer[client] = 0;
+		ig_clphase[client] = 0;
+		return *release;
+	}
+	if (ig_casteer[client] <= AAS_Time() || ig_casteer[client] > AAS_Time() + IG_CA_STEER + 1)
+	{
+		ig_clphase[client] = 0;
+		return 0;
+	}
+	if (hooked && ig_clphase[client] != 1) return 0;      /* still the climb itself */
+	oz = ig_caoz[client];
+	if (!mode)
+	{   /* the plain push of the first version */
+		if (!IG_ClimbSteer(client, origin, 0, 0, movedir)) return 0;
+		IG_ClimbLookDir(client, origin, d);
+		vectoangles(d, view);
+		return 1;
+	}
+	VectorAdd(origin, viewoffset, eye);
+	if (ig_clphase[client] == 1)
+	{   /* hooked down: keep it, let go near the floor */
+		IG_GrappleTravelNote(client);         /* not an orphan for the watchdog */
+		VectorSubtract(ig_clanchor[client], eye, d);
+		vectoangles(d, view);
+		if (origin[2] <= oz + IG_CL_LOW || AAS_Time() - ig_clfire[client] > IG_CL_PULL)
+		{
+			*release = 1;
+			ig_clphase[client] = 2;
+		}
+		return 1;
+	}
+	/* grapple down: over the landing floor, high, hook free */
+	/* the hook wait itself, not IG_CanFireHook: the drill blocks other hooks */
+	if ((mode & 2) && ig_clphase[client] == 0 && origin[2] > oz + IG_CL_HIGH && AAS_Time() - ig_lastfire[client] >= IG_HOOK_WAIT)
+	{
+		if (IG_FloorUnder(origin, oz))
+		{
+			VectorSet(end, ig_caspot[client][0], ig_caspot[client][1], oz - 24 - 8);
+			tr = AAS_Trace(eye, NULL, NULL, end, ENTITYNUM_NONE, CONTENTS_SOLID);
+			VectorSubtract(tr.endpos, end, d);
+			if (!tr.startsolid && tr.fraction < 1 && VectorLength(d) < 24)
+			{
+				VectorSubtract(tr.endpos, eye, d);
+				vectoangles(d, view);
+				if (fabs(AngleMod(view[0] - viewangles[0] + 180) - 180) < IG_CL_AIM &&
+					fabs(AngleMod(view[1] - viewangles[1] + 180) - 180) < IG_CL_AIM)
+				{
+					VectorCopy(tr.endpos, ig_clanchor[client]);
+					*fire = 1;
+					ig_clphase[client] = 1;
+					ig_clfire[client] = AAS_Time();
+					IG_NoteHookFire(client);
+				}
+				return 1;    /* turning to the floor point */
+			}
+		}
+	}
+	/* air strafe: the velocity that takes it to the spot in IG_CL_TIME */
+	VectorSubtract(ig_caspot[client], origin, d);
+	d[2] = 0;
+	VectorScale(d, 1.0f / IG_CL_TIME, want);
+	if (VectorLength(want) > 300) { VectorNormalize(want); VectorScale(want, 300, want); }
+	VectorSet(d, want[0] - velocity[0], want[1] - velocity[1], 0);
+	if (VectorLength(d) < 20) return 0;
+	VectorNormalize(d);
+	if (mode & 1) VectorCopy(d, movedir);
+	/* look where it is going, level */
+	VectorSet(ang, velocity[0], velocity[1], 0);
+	if (VectorLength(ang) < 50) VectorCopy(want, ang);
+	vectoangles(ang, view);
+	view[0] = 0;
 	return 1;
 }
