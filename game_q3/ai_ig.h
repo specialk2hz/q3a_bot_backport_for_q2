@@ -45,6 +45,17 @@ void IG_PmoveInit(igpm_t *p, const vec3_t org, const vec3_t vel, int ground, int
 void IG_Pmove(igpm_t *p, float fmove, float smove, float upmove, float pitch, float yaw, int msec);
 int  IG_PmoveTraces(void);
 
+/* ai_ig_plan.c -- the movement planner (IG-40) */
+int  IG_PlanOn(void);
+int  IG_Plan(bot_state_t *bs, bot_goal_t *goal, bot_moveresult_t *mr);
+float IG_PlanAffinity(bot_state_t *bs);		/* ai_ig_sling.c */
+void IG_PlanNode(int c, const char *node);
+int  IG_PlanViewSet(int c);
+void IG_PlanTick(bot_state_t *bs);
+void IG_PlanGuard(bot_state_t *bs, bot_input_t *bi);
+int  IG_PlanFireUnsafe(bot_state_t *bs, const vec3_t anchor, int hold);
+int  IG_PlanHookUnsafe(bot_state_t *bs, int hold);
+
 /* ai_ig_revenge.c */
 int  IG_RevengeTarget(bot_state_t *bs);
 void IG_RevengeDeath(bot_state_t *bs, int attacker);

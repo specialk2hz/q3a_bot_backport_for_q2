@@ -398,6 +398,21 @@ void EA_Move(int client, vec3_t dir, float speed)
 // Returns:				-
 // Changes Globals:		-
 //===========================================================================
+/* IG-40: the movement planner sets the whole move at once -- the stock
+ * movement's jump, crouch and key moves go, its own take their place. */
+void EA_IGMove(int client, vec3_t dir, float speed, int jump, int crouch)
+{
+	bot_input_t *bi = &botinputs[client];
+
+	VectorCopy(dir, bi->dir);
+	if (speed > MAX_USERMOVE) speed = MAX_USERMOVE;
+	bi->speed = speed;
+	bi->actionflags &= ~(ACTION_JUMP | ACTION_DELAYEDJUMP | ACTION_CROUCH | ACTION_MOVEFORWARD |
+						 ACTION_MOVEBACK | ACTION_MOVELEFT | ACTION_MOVERIGHT);
+	if (jump) bi->actionflags |= ACTION_JUMP;
+	if (crouch) bi->actionflags |= ACTION_CROUCH;
+}
+
 void EA_View(int client, vec3_t viewangles)
 {
 	bot_input_t *bi;

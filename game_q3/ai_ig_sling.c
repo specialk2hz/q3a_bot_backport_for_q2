@@ -1061,6 +1061,13 @@ static void IG_HookMove(bot_state_t *bs, int infight)
 		}
 		if (!IG_FlickReady(bs, f->anchor)) return;
 		if (!IG_CanFireHook(c)) return;      /* OSP's hook_wait, shared */
+		/* IG-40: not a hook whose ride and let-go end in lava or a pit */
+		if (IG_PlanOn() && IG_PlanFireUnsafe(bs, f->anchor, 3)) {
+			BotAI_Print(PRT_MESSAGE, "ig: guard %d fighthook skip\n", c);
+			f->state = IG_FIGHT_NONE;
+			f->cooldown = FloatTime() + 0.5f;
+			return;
+		}
 		trap_EA_Command(c, LibVarGetString("cmd_grappleon"));
 		IG_NoteHookFire(c);
 		IG_GrappleTravelNote(c);
@@ -1083,8 +1090,18 @@ static void IG_HookMove(bot_state_t *bs, int infight)
 		}
 		VectorSubtract(bs->origin, f->latched ? f->latchpos : bs->origin, d);
 		dist = VectorLength(d);
-		if (f->latched && dist < 0.5f * f->remain && FloatTime() - f->latched < IG_PULL_TIME(IG_FIGHT_PULL) && speed > IG_PULL_SPEED(IG_STALL_SPEED))
-			return;     /* still riding it; the AI aims at the enemy meanwhile */
+		if (f->latched && dist < 0.5f * f->remain && FloatTime() - f->latched < IG_PULL_TIME(IG_FIGHT_PULL) && speed > IG_PULL_SPEED(IG_STALL_SPEED)) {
+			/* IG-40: still riding it, unless riding on ends in lava and letting go does not */
+			if (!(IG_PlanOn() && IG_PlanHookUnsafe(bs, 2) && !IG_PlanHookUnsafe(bs, 0)))
+				return;     /* the AI aims at the enemy meanwhile */
+			BotAI_Print(PRT_MESSAGE, "ig: guard %d fighthook letgo\n", c);
+		}
+		/* IG-40: hold on while letting go ends in lava and a longer ride does not */
+		else if (IG_PlanOn() && f->latched && FloatTime() - f->latched < IG_ARC_HOLD &&
+				 IG_PlanHookUnsafe(bs, 0) && !IG_PlanHookUnsafe(bs, 3)) {
+			BotAI_Print(PRT_MESSAGE, "ig: guard %d fighthook hold\n", c);
+			return;
+		}
 		/* IG-39: hold on while letting go would fly into lava, a pit or a wall */
 		if (f->latched && IG_ArcSafeOn() && FloatTime() - f->latched < IG_ARC_HOLD &&
 			IG_HookNear(f->anchor, 48, hookpos)) {
@@ -1736,9 +1753,30 @@ static int IG_PadApproach(bot_state_t *bs, bot_goal_t *goal, bot_moveresult_t *m
 	return 0;
 }
 
+float IG_PlanAffinity(bot_state_t *bs)
+{
+	return trap_Cvar_VariableIntegerValue("ig_affinity") ? IG_HookAffinity(bs) : IG_AFFINITY_MID;
+}
+
 void IG_Slingshot(bot_state_t *bs, bot_goal_t *goal, bot_moveresult_t *moveresult)
 {
 	int c = bs->client;
+
+	/* IG-40: the planner moves the bot; the trick-by-trick code stands down.
+	 * Kept for now: the jump-pad hooks, the lava escape, a fight hook's end. */
+	if (IG_PlanOn()) {
+		if (IG_PadHook(bs)) return;
+		if (IG_LavaEscape(bs)) return;
+		if (c >= 0 && c < MAX_CLIENTS && ig_fight[c].state != IG_FIGHT_NONE) {
+			if (ig_fight[c].state == IG_FIGHT_HOOKED) IG_HookMove(bs, 0);
+			else ig_fight[c].state = IG_FIGHT_NONE;
+			return;
+		}
+		if (c >= 0 && c < MAX_CLIENTS && IG_InPadFlight(bs)) return;
+		if (IG_PadApproach(bs, goal, moveresult)) return;
+		IG_Plan(bs, goal, moveresult);
+		return;
+	}
 
 	if (IG_PadHook(bs)) return;      /* IG-13: flying a pad, hooking its landing */
 	if (c >= 0 && c < MAX_CLIENTS && IG_InPadFlight(bs)) {
