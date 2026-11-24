@@ -25,6 +25,18 @@ int IG_PadFlight(int client, vec3_t end);
 void IG_GrappleBlocked(int reachnum);
 void IG_GrappleAim(const vec3_t eye, const vec3_t anchor, float lift, int passent, vec3_t viewdir);
 void IG_GrappleWatchdog(int client);
+/* IG-36 (libvar ig_climbaim): climbs hook the frame or the landing floor, then steer to the landing's middle */
+struct aas_reachability_s;
+int IG_ClimbAimOn(void);
+int IG_ClimbAimReach(int client, int reachnum, const struct aas_reachability_s *reach, struct aas_reachability_s *out);
+int IG_ClimbAimLetGo(int client, const vec3_t origin);
+int IG_ClimbSteer(int client, const vec3_t origin, int grounded, int hooked, vec3_t dir);
+/* IG-37 (libvar ig_drill): the climb drill */
+void IG_ClimbAimForce(int client, int on);
+void IG_DrillSetActive(int client, int on);
+int IG_ClimbAimSpot(int reachnum, vec3_t spot, float *oz);
+int IG_ClimbAimPick(int client, int reachnum);
+int IG_ClimbLookDir(int client, const vec3_t origin, vec3_t dir);
 struct aas_reachability_s;
 float IG_GrappleDist(int client, int reachnum, const vec3_t origin, const vec3_t viewoffset, const struct aas_reachability_s *reach, float last);
 

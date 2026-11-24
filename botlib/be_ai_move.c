@@ -46,6 +46,7 @@ Foundation, Inc., 51 Franklin St, Fifth Floor, Boston, MA  02110-1301  USA
 #include "../game_q3/be_ai_goal.h"
 #include "../game_q3/be_ai_move.h"
 #include "be_ig_hook.h" /* IG: */
+#include "be_aas_def.h" /* IG: IG-37, the drill reads the reachabilities */
 
 
 //#define DEBUG_AI_MOVE
@@ -2984,7 +2985,11 @@ bot_moveresult_t BotTravel_Grapple(bot_movestate_t *ms, aas_reachability_t *reac
 	int state, areanum;
 	bsp_trace_t trace;
 
+	aas_reachability_t ig_reach; /* IG-36 */
+	int ig_mine = 0;
+
 	IG_GrappleTravelNote(ms->client); /* IG: the hook watchdog (IG-6) */
+	if (IG_HookDetect() && IG_ClimbAimReach(ms->client, ms->lastreachnum, reach, &ig_reach)) { reach = &ig_reach; ig_mine = 1; } /* IG: IG-36 */
 #ifdef DEBUG_GRAPPLE
 	static int debugline;
 	if (!debugline) debugline = botimport.DebugLineCreate();
@@ -3020,7 +3025,10 @@ bot_moveresult_t BotTravel_Grapple(bot_movestate_t *ms, aas_reachability_t *reac
 		if (IG_HookDetect()) dist = IG_GrappleDist(ms->client, ms->lastreachnum, ms->origin, ms->viewoffset, reach, ms->lastgrappledist); /* IG: IG-6 */
 		//if very close to the grapple end or the grappled is hooked and
 		//the bot doesn't get any closer
-		if (IG_HookDetect() && state == 2 && IG_ClimbLetGo(ms->origin, reach)) { dist = 0; ms->lastgrappledist = 0; botimport.Print(PRT_MESSAGE, "ig: climb letgo %d\n", ms->client); } /* IG: IG-32 */
+		/* IG-36: with its own anchor, let go over the landing whatever the hook's
+		 * state -- it bites the frame a little off the aimed point, the latch
+		 * test missed it, and the bot held on at the door (Billy) */
+		if (IG_HookDetect() && ((state == 2 && IG_ClimbLetGo(ms->origin, reach)) || (ig_mine && state && IG_ClimbAimLetGo(ms->client, ms->origin)))) { dist = 0; ms->lastgrappledist = 0; botimport.Print(PRT_MESSAGE, "ig: climb letgo %d\n", ms->client); } /* IG: IG-32 */
 		if (state && dist < 48)
 		{
 			if (ms->lastgrappledist - dist < 1)
@@ -3064,6 +3072,13 @@ bot_moveresult_t BotTravel_Grapple(bot_movestate_t *ms, aas_reachability_t *reac
 		} //end if
 		//remember the current grapple distance
 		ms->lastgrappledist = dist;
+		/* IG-36: look where it is going -- at the landing, level -- not around
+		 * (Billy: it turned around during the climb to the lava-room door) */
+		if (ig_mine && IG_ClimbLookDir(ms->client, ms->origin, dir))
+		{
+			Vector2Angles(dir, result.ideal_viewangles);
+			result.flags |= MOVERESULT_MOVEMENTVIEW;
+		}
 	} //end if
 	else
 	{
@@ -3077,7 +3092,7 @@ bot_moveresult_t BotTravel_Grapple(bot_movestate_t *ms, aas_reachability_t *reac
 		if (!(ms->moveflags & MFL_SWIMMING)) dir[2] = 0;
 		VectorAdd(ms->origin, ms->viewoffset, org);
 		VectorSubtract(reach->end, org, viewdir);
-		if (IG_HookDetect()) IG_GrappleAim(org, reach->end, ms->viewoffset[2], ms->entitynum, viewdir); /* IG: IG-6 */
+		if (IG_HookDetect() && !ig_mine) IG_GrappleAim(org, reach->end, ms->viewoffset[2], ms->entitynum, viewdir); /* IG: IG-6; IG-36's anchors are exact */
 		//
 		dist = VectorNormalize(dir);
 		if (IG_HookDetect()) dist = IG_GrappleStartDist(dist); /* IG: IG-6, no running in place */
@@ -3462,6 +3477,207 @@ bot_moveresult_t BotMoveInGoalArea(bot_movestate_t *ms, bot_goal_t *goal)
 // Returns:					-
 // Changes Globals:		-
 //===========================================================================
+
+/* IG-37: the climb drill (libvar ig_drill, default 0). One bot -- the first
+ * that moves while it is on -- is put at a hook-climb route's start (the game
+ * places it, "igdrillpos"), climbs it, lands, and the outcome is logged
+ * ("igdrill" lines); then the next try. ig_drill 1: every climb route of the
+ * map, ig_drilltries tries each; 2: only the route starting nearest
+ * ig_drillx/y/z (to watch one climb over and over). ig_drillaim: 0 bspc's
+ * anchor, 1 IG-36's (with its steering), 2 alternate try by try (the A/B).
+ * Nothing else hooks for the drilling bot meanwhile (IG_DrillSetActive). */
+enum { IG_DR_PICK, IG_DR_PLACED, IG_DR_CLIMB, IG_DR_LAND, IG_DR_PAUSE, IG_DR_DONE };
+static struct
+{
+	int client, phase, idx, tryn, reach, aim, fired, mode;
+	float t0, tfire, trel;
+	int *list, count, built;
+} igdr = { -1 };
+
+static void IG_DrillBuild(void)
+{
+	int i, best = -1, mode = (int) LibVarValue("ig_drill", "0");
+	float d, bestd = 400;
+	vec3_t p, v;
+
+	free(igdr.list);
+	igdr.list = calloc(aasworld.reachabilitysize + 1, sizeof(int));
+	igdr.count = 0;
+	igdr.built = aasworld.reachabilitysize;
+	igdr.mode = mode;
+	if (!igdr.list) return;
+	VectorSet(p, LibVarValue("ig_drillx", "0"), LibVarValue("ig_drilly", "0"), LibVarValue("ig_drillz", "0"));
+	for (i = 1; i < aasworld.reachabilitysize; i++)
+	{
+		if ((aasworld.reachability[i].traveltype & TRAVELTYPE_MASK) != TRAVEL_GRAPPLEHOOK) continue;
+		if (mode == 2)
+		{
+			VectorSubtract(aasworld.reachability[i].start, p, v);
+			d = VectorLength(v);
+			if (d < bestd) { bestd = d; best = i; }
+			continue;
+		}
+		/* ig_drillpart k of ig_drillparts n: every n-th route from the k-th, so a
+		 * map's drill splits into runs under OSP's hour without a human */
+		{
+			int parts = (int) LibVarValue("ig_drillparts", "1"), part = (int) LibVarValue("ig_drillpart", "0");
+			if (parts > 1 && (i % parts) != part) continue;
+		}
+		igdr.list[igdr.count++] = i;
+	}
+	if (mode == 2 && LibVarValue("ig_drillreach", "0") > 0)
+		best = (int) LibVarValue("ig_drillreach", "0");   /* "r<n>": that route */
+	if (mode == 2 && best > 0) igdr.list[igdr.count++] = best;
+	botimport.Print(PRT_MESSAGE, "igdrill: %d climb route(s), %d tries each\n", igdr.count, (int) LibVarValue("ig_drilltries", "10"));
+}
+
+static void IG_DrillOutcome(bot_movestate_t *ms, const char *what)
+{
+	vec3_t spot, d;
+	float oz, dist = -1;
+	aas_reachability_t *r = &aasworld.reachability[igdr.reach];
+	const char *res = what;
+
+	if (!res)
+	{
+		if (!IG_ClimbAimSpot(igdr.reach, spot, &oz))
+		{
+			oz = aasworld.areas[r->areanum].mins[2];
+			VectorCopy(aasworld.areas[r->areanum].center, spot);
+		}
+		VectorSubtract(spot, ms->origin, d);
+		d[2] = 0;
+		dist = VectorLength(d);
+		res = ms->origin[2] >= oz - 8 ? "up" : "fell";
+	}
+	botimport.Print(PRT_MESSAGE, "igdrill reach %d try %d aim %d result %s dist %.0f fire %.2f land %.2f at %.0f %.0f %.0f start %.0f %.0f %.0f pick %d\n",
+					igdr.reach, igdr.tryn, igdr.aim, res, dist,
+					igdr.fired ? igdr.tfire - igdr.t0 : -1, igdr.fired ? AAS_Time() - igdr.tfire : -1,
+					ms->origin[0], ms->origin[1], ms->origin[2], r->start[0], r->start[1], r->start[2],
+					IG_ClimbAimPick(ms->client, igdr.reach));
+	igdr.phase = IG_DR_PAUSE;
+	igdr.t0 = AAS_Time();
+}
+
+/* 1: the drill moved the bot this think (BotMoveToGoal returns) */
+static int IG_Drill(bot_movestate_t *ms, bot_moveresult_t *result)
+{
+	int mode = (int) LibVarValue("ig_drill", "0"), tries;
+	aas_reachability_t *r;
+	char cmd[128];
+	vec3_t dir, ang;
+	float now = AAS_Time();
+
+	if (!mode)
+	{
+		if (igdr.client >= 0) IG_DrillSetActive(igdr.client, 0);
+		igdr.client = -1;
+		igdr.built = 0;
+		return 0;
+	}
+	if (igdr.client < 0) { igdr.client = ms->client; igdr.phase = IG_DR_PICK; igdr.idx = 0; igdr.tryn = 0; igdr.built = 0; }
+	if (ms->client != igdr.client) return 0;
+	if (igdr.built != aasworld.reachabilitysize || igdr.mode != mode || now < igdr.t0 - 1)
+	{   /* a new map, or the mode changed */
+		IG_DrillBuild();
+		igdr.phase = IG_DR_PICK; igdr.idx = 0; igdr.tryn = 0;
+	}
+	IG_DrillSetActive(ms->client, igdr.phase != IG_DR_DONE);
+	tries = (int) LibVarValue("ig_drilltries", "10");
+	if (tries < 1) tries = 1;
+	switch (igdr.phase)
+	{
+	case IG_DR_DONE:
+		return 0;
+	case IG_DR_PICK:
+		if (igdr.idx >= igdr.count)
+		{
+			if (mode == 2) { igdr.idx = 0; igdr.tryn = 0; }   /* one route: over and over */
+			else { botimport.Print(PRT_MESSAGE, "igdrill done\n"); igdr.phase = IG_DR_DONE; return 0; }
+			if (!igdr.count) { igdr.phase = IG_DR_DONE; return 0; }
+		}
+		igdr.reach = igdr.list[igdr.idx];
+		r = &aasworld.reachability[igdr.reach];
+		if ((r->traveltype & TRAVELTYPE_MASK) != TRAVEL_GRAPPLEHOOK)
+		{   /* taken out meanwhile */
+			igdr.idx++; igdr.tryn = 0;
+			return 1;
+		}
+		{
+			int am = (int) LibVarValue("ig_drillaim", "2");
+			igdr.aim = am == 2 ? igdr.tryn % 2 : am;
+		}
+		IG_ClimbAimForce(ms->client, igdr.aim);
+		VectorSubtract(r->end, r->start, dir);
+		vectoangles(dir, ang);
+		/* one argument: the command reaches the game with its first argument only */
+		Com_sprintf(cmd, sizeof(cmd), "igdrillpos %d_%d_%d_%d", (int) r->start[0], (int) r->start[1], (int) r->start[2] + 2, (int) ang[YAW]);
+		EA_Command(ms->client, cmd);
+		if (ms->moveflags & MFL_ACTIVEGRAPPLE) EA_Command(ms->client, cmd_grappleoff->string);
+		ms->moveflags &= ~(MFL_ACTIVEGRAPPLE | MFL_GRAPPLERESET);
+		igdr.phase = IG_DR_PLACED;
+		igdr.t0 = now;
+		igdr.fired = 0;
+		return 1;
+	case IG_DR_PLACED:
+		r = &aasworld.reachability[igdr.reach];
+		VectorSubtract(r->start, ms->origin, dir);
+		if (VectorLength(dir) > 32 && now - igdr.t0 < 0.5f) return 1;
+		igdr.phase = IG_DR_CLIMB;
+		igdr.t0 = now;
+		/* fall through */
+	case IG_DR_CLIMB:
+		r = &aasworld.reachability[igdr.reach];
+		ms->lastreachnum = igdr.reach;
+		ms->reachareanum = r->areanum;
+		ms->reachability_time = now + 5;
+		*result = BotTravel_Grapple(ms, r);
+		result->failure = false;
+		if (ms->moveflags & MFL_ACTIVEGRAPPLE)
+		{
+			if (!igdr.fired) { igdr.fired = 1; igdr.tfire = now; }
+			if (now - igdr.tfire > 5)
+			{
+				EA_Command(ms->client, cmd_grappleoff->string);
+				ms->moveflags &= ~MFL_ACTIVEGRAPPLE;
+				IG_DrillOutcome(ms, "hung");
+			}
+		}
+		else if (igdr.fired)
+		{
+			igdr.phase = IG_DR_LAND;
+			igdr.trel = now;
+			ms->moveflags &= ~MFL_GRAPPLERESET;
+		}
+		else if (now - igdr.t0 > 3)
+			IG_DrillOutcome(ms, "nofire");
+		return 1;
+	case IG_DR_LAND:
+		/* the higher AI sets MFL_ONGROUND from the player state (BotSetupForMovement) */
+		if (now - igdr.trel > 0.15f && (ms->moveflags & MFL_ONGROUND))
+		{
+			IG_DrillOutcome(ms, NULL);
+			return 1;
+		}
+		if (now - igdr.trel > 3) { IG_DrillOutcome(ms, NULL); return 1; }
+		/* in the air: IG-36's steering when that aim is on, else nothing */
+		if (IG_ClimbSteer(ms->client, ms->origin, 0, 0, result->movedir))
+			EA_Move(ms->client, result->movedir, 400);
+		if (IG_ClimbLookDir(ms->client, ms->origin, dir))
+		{
+			Vector2Angles(dir, result->ideal_viewangles);
+			result->flags |= MOVERESULT_MOVEMENTVIEW;
+		}
+		return 1;
+	case IG_DR_PAUSE:
+		if (now - igdr.t0 < LibVarValue("ig_drillpause", "0.3")) return 1;
+		if (++igdr.tryn >= tries) { igdr.idx++; igdr.tryn = 0; }
+		igdr.phase = IG_DR_PICK;
+		return 1;
+	}
+	return 0;
+}
+
 void BotMoveToGoal(bot_moveresult_t *result, int movestate, bot_goal_t *goal, int travelflags)
 {
 	int reachnum, lastreachnum, foundjumppad, ent, resultflags, ontrain = false;
@@ -3479,6 +3695,7 @@ void BotMoveToGoal(bot_moveresult_t *result, int movestate, bot_goal_t *goal, in
 	//reset the grapple before testing if the bot has a valid goal
 	//because the bot could lose all its goals when stuck to a wall
 	BotResetGrapple(ms);
+	if (IG_HookDetect() && IG_Drill(ms, result)) return; /* IG: IG-37, the climb drill */
 	//
 	if (!goal)
 	{
@@ -3620,6 +3837,13 @@ void BotMoveToGoal(bot_moveresult_t *result, int movestate, bot_goal_t *goal, in
 	//drag the bot along the ground, and the on-ground arm then re-routes from the
 	//new area and drops the hook. While its hook is out, it travels as if in the air.
 	if (IG_HookDetect() && (ms->moveflags & MFL_ACTIVEGRAPPLE)) ms->moveflags &= ~MFL_ONGROUND; /* IG: */
+	//IG: IG-36, after a climb lets go: air strafe to the middle of the landing
+	if (IG_HookDetect() && IG_ClimbSteer(ms->client, ms->origin, (ms->moveflags & (MFL_ONGROUND|MFL_SWIMMING|MFL_AGAINSTLADDER)) != 0,
+										 (ms->moveflags & MFL_ACTIVEGRAPPLE) != 0, result->movedir))
+	{
+		EA_Move(ms->client, result->movedir, 400);
+		return;
+	}
 	//if the bot is on the ground, swimming or against a ladder
 	if (ms->moveflags & (MFL_ONGROUND|MFL_SWIMMING|MFL_AGAINSTLADDER))
 	{
