@@ -785,10 +785,19 @@ static int IG_PullLands(const vec3_t start, const vec3_t anchor, float oz)
 	aas_trace_t trace;
 	int k;
 
+	vec3_t mins, maxs;
+	bsp_trace_t btr;
+
 	VectorCopy(anchor, end);
 	end[2] -= IG_CA_EYE;
-	trace = AAS_TraceClientBBox((vec_t *) start, end, PRESENCE_NORMAL, -1);
-	VectorSubtract(trace.endpos, start, d);
+	/* a margin: the player's box 4 units wider, so the body clears a
+	 * corner sticking out on the way up rather than grazing it */
+	AAS_PresenceTypeBoundingBox(PRESENCE_NORMAL, mins, maxs);
+	mins[0] -= 4; mins[1] -= 4; maxs[0] += 4; maxs[1] += 4;
+	btr = AAS_Trace((vec_t *) start, mins, maxs, end, ENTITYNUM_NONE, CONTENTS_SOLID | CONTENTS_PLAYERCLIP);
+	if (btr.startsolid) return 0;
+	(void) trace;
+	VectorSubtract(btr.endpos, start, d);
 	for (k = 1; k <= 16; k++)
 	{
 		VectorMA(start, k / 16.0f, d, p);
@@ -797,6 +806,48 @@ static int IG_PullLands(const vec3_t start, const vec3_t anchor, float oz)
 		if (IG_FloorAt(p, oz)) return 1;
 	}
 	return 0;
+}
+
+/* A hook point Billy would take: on the FRONT face of what it hooks (the face
+ * looking back at the bot -- at q2rdm11's lava-room door the frame sticks out
+ * on both sides and bspc hooks its side face), and on a flat part of it: the
+ * same plane IG_FLAT_R units around, so not an edge or a corner. */
+#define IG_FACE_DOT 0.7f
+#define IG_FLAT_R   16
+static int IG_FrontFlat(const vec3_t eye, const bsp_trace_t *hit, const vec3_t fdir)
+{
+	vec3_t t1, t2, up = { 0, 0, 1 }, p, d, end;
+	bsp_trace_t tr;
+	int k;
+	float sx, sy;
+
+	/* faces the bot: its normal points back at the eye, horizontally (a side
+	 * face of a frame that sticks out looks across the climb, not at it) */
+	VectorSet(d, eye[0] - hit->endpos[0], eye[1] - hit->endpos[1], 0);
+	VectorNormalize(d);
+	VectorSet(p, hit->plane.normal[0], hit->plane.normal[1], 0);
+	if (DotProduct(p, d) < IG_FACE_DOT) return 0;
+	(void) fdir;
+	/* flat: four points around it on its plane hit the same plane */
+	CrossProduct(hit->plane.normal, up, t1);
+	if (VectorNormalize(t1) < 0.1f) VectorSet(t1, 1, 0, 0);
+	CrossProduct(hit->plane.normal, t1, t2);
+	VectorNormalize(t2);
+	for (k = 0; k < 4; k++)
+	{
+		sx = (k & 1) ? IG_FLAT_R : -IG_FLAT_R;
+		sy = (k & 2) ? IG_FLAT_R : -IG_FLAT_R;
+		VectorMA(hit->endpos, sx, t1, p);
+		VectorMA(p, sy, t2, p);
+		VectorSubtract(p, eye, d);
+		VectorMA(eye, 1.2f, d, end);
+		tr = AAS_Trace((vec_t *) eye, NULL, NULL, end, ENTITYNUM_NONE, CONTENTS_SOLID);
+		if (tr.startsolid || tr.fraction >= 1) return 0;
+		if (DotProduct(tr.plane.normal, hit->plane.normal) < 0.98f) return 0;
+		VectorSubtract(tr.endpos, hit->endpos, d);
+		if (fabs(DotProduct(d, hit->plane.normal)) > 4) return 0;
+	}
+	return 1;
 }
 
 static void IG_ClimbAimCompute(int reachnum, const aas_reachability_t *reach)
@@ -876,7 +927,12 @@ static void IG_ClimbAimCompute(int reachnum, const aas_reachability_t *reach)
 			if (dbg) botimport.Print(PRT_MESSAGE, "ig: ca %d f %.0f h %.0f hit %.0f %.0f %.0f beyond %.0f lateral %.0f clear %d\n", reachnum, fs[i], hs[j],
 									  hit[0], hit[1], hit[2], beyond, lateral, IG_PullClear(reach->start, eye, hit));
 			if (beyond < -24 || beyond > 220 || lateral > IG_CA_SIDE) continue;
-			if (!IG_PullLands(reach->start, hit, oz)) continue;
+			{
+				int ff = IG_FrontFlat(eye, &tr, fdir), pl = IG_PullLands(reach->start, hit, oz);
+				if (dbg) botimport.Print(PRT_MESSAGE, "ig: cand %d hit %.0f %.0f %.0f n %.2f %.2f %.2f front/flat %d pull %d\n", reachnum,
+										  hit[0], hit[1], hit[2], tr.plane.normal[0], tr.plane.normal[1], tr.plane.normal[2], ff, pl);
+				if (!ff || !pl) continue;
+			}
 			h = hit[2] - (oz + 150);
 			score = -0.5f * lateral - 0.3f * fabs(h) - 0.2f * (beyond > 48 ? beyond - 48 : 0);
 			if (score > best) { best = score; VectorCopy(hit, ca->frame); ca->hasframe = 1; }
