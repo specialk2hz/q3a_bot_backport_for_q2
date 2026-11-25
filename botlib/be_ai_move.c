@@ -3757,7 +3757,7 @@ static void IG_AirNoRoute(bot_movestate_t *ms, bot_goal_t *goal, int travelflags
  * IG_PadReachAtLoad added (in turn), with that route's landing floor as its
  * goal; "ok" when it stands on that floor's level within 6 s. The planner's
  * pad top takes the same goal (IG_PadDrillGoal). */
-static struct { int client, idx, phase, reach; float t0; int padtop; } igpd = { -1 };
+static struct { int client, idx, phase, reach; float t0; int padtop, padin, launched, landed, forcereach, via; } igpd = { -1 };
 static bot_goal_t igpd_goal;
 
 bot_goal_t *IG_PadDrillGoal(int client)
@@ -3768,6 +3768,19 @@ bot_goal_t *IG_PadDrillGoal(int client)
 void IG_PadDrillNoteTop(int client)
 {
 	if (igpd.client == client) igpd.padtop = 1;
+}
+
+/* the forced route's pad, while it is still ahead (for IG_PadAhead) */
+int IG_PadDrillPad(int client, vec3_t pad)
+{
+	if (igpd.client != client || igpd.phase != 2 || igpd.forcereach <= 0 || igpd.launched) return 0;
+	VectorCopy(aasworld.reachability[igpd.forcereach].start, pad);
+	return 1;
+}
+
+void IG_PadDrillNoteIn(int client)
+{
+	if (igpd.client == client) igpd.padin = 1;
 }
 
 static int IG_PadDrill(bot_movestate_t *ms, bot_moveresult_t *result)
@@ -3782,7 +3795,123 @@ static int IG_PadDrill(bot_movestate_t *ms, bot_moveresult_t *result)
 	if (igpd.client < 0) { igpd.client = ms->client; igpd.idx = 0; igpd.phase = 0; }
 	if (igpd.client != ms->client) return 0;
 	n = IG_PadReachList(list, 64);
-	if (!n) return 0;
+	{	/* ig_paddrillmin: only the routes landing this far across (the hook's) */
+		float min = LibVarValue("ig_paddrillmin", "0");
+		int i, m = 0;
+
+		for (i = 0; i < n; i++) {
+			aas_reachability_t *q = &aasworld.reachability[list[i]];
+			float dx = q->end[0] - q->start[0], dy = q->end[1] - q->start[1];
+
+			if (dx * dx + dy * dy >= min * min) list[m++] = list[i];
+		}
+		n = m;
+	}
+	if (!n && !LibVarGetString("ig_paddrillstart")[0]) return 0;
+	/* ig_paddrillstart "x_y_z_yaw" + ig_paddrillgoal "x_y_z": one route, start to
+	 * goal, as a player would run it (Billy's q2rdm11 pad route) */
+	{
+		char *st = LibVarGetString("ig_paddrillstart"), *gs = LibVarGetString("ig_paddrillgoal");
+		float sx, sy, sz, syaw, gx, gy, gz;
+
+		if (st && gs && sscanf(st, "%f_%f_%f_%f", &sx, &sy, &sz, &syaw) == 4 && sscanf(gs, "%f_%f_%f", &gx, &gy, &gz) == 3) {
+			vec3_t g;
+
+			switch (igpd.phase) {
+			case 0:
+				Com_sprintf(cmd, sizeof(cmd), "igdrillpos %d_%d_%d_%d", (int) sx, (int) sy, (int) sz, (int) syaw);
+				EA_Command(ms->client, cmd);
+				Com_Memset(&igpd_goal, 0, sizeof(igpd_goal));
+				VectorSet(g, gx, gy, gz);
+				VectorCopy(g, igpd_goal.origin);
+				{	/* a point on the floor can sit on an area's edge: look a little up */
+					int k;
+
+					for (k = 0; k < 6 && !(igpd_goal.areanum = AAS_PointAreaNum(g)); k++) g[2] += 8;
+					if (!igpd_goal.areanum) botimport.Print(PRT_MESSAGE, "igpaddrill: no area at the goal\n");
+				}
+				VectorSet(igpd_goal.mins, -8, -8, -8);
+				VectorSet(igpd_goal.maxs, 8, 8, 8);
+				igpd.phase = 1; igpd.t0 = now; igpd.padtop = 0; igpd.padin = 0; igpd.launched = 0; igpd.landed = 0; igpd.via = 0;
+				return 1;
+			case 1:
+				if (now - igpd.t0 < 0.5f) return 1;
+				igpd.phase = 2; igpd.t0 = now;
+				return 2;
+			case 2:
+				VectorSet(g, gx, gy, gz);
+				VectorSubtract(g, ms->origin, dir);
+				dir[2] = 0;
+				if (ms->velocity[2] > 500) igpd.launched = 1;
+				if (VectorLength(dir) < 150 && fabs(ms->origin[2] - gz) < 64) {
+					botimport.Print(PRT_MESSAGE, "igpaddrill route ok time %.2f padin %d pad %d padtop %d\n", now - igpd.t0, igpd.padin, igpd.launched, igpd.padtop);
+					igpd.phase = 3; igpd.t0 = now;
+					return 1;
+				}
+				if (now - igpd.t0 > 12) {
+					botimport.Print(PRT_MESSAGE, "igpaddrill route fail padin %d pad %d padtop %d at %.0f %.0f %.0f\n", igpd.padin, igpd.launched, igpd.padtop, ms->origin[0], ms->origin[1], ms->origin[2]);
+					igpd.phase = 3; igpd.t0 = now;
+					return 1;
+				}
+				/* ig_paddrillvia "x_y_z": through there first (the routing alone takes
+				 * q2rdm11's teleporter, not Billy's walkway: it prices running) */
+				{
+					char *vs = LibVarGetString("ig_paddrillvia");
+					float vx, vy, vz2;
+
+					if (!igpd.via && vs && sscanf(vs, "%f_%f_%f", &vx, &vy, &vz2) == 3) {
+						vec3_t v, dv;
+						int k;
+
+						VectorSet(v, vx, vy, vz2);
+						VectorSubtract(v, ms->origin, dv);
+						dv[2] = 0;
+						if (VectorLength(dv) < 200 && fabs(ms->origin[2] - vz2) < 64) igpd.via = 1;
+						else {
+							Com_Memset(&igpd_goal, 0, sizeof(igpd_goal));
+							for (k = 0; k < 6 && !(igpd_goal.areanum = AAS_PointAreaNum(v)); k++) v[2] += 8;
+							VectorCopy(v, igpd_goal.origin);
+							VectorSet(igpd_goal.mins, -8, -8, -8);
+							VectorSet(igpd_goal.maxs, 8, 8, 8);
+						}
+						if (igpd.via) {		/* on to the goal */
+							VectorCopy(g, v);
+							Com_Memset(&igpd_goal, 0, sizeof(igpd_goal));
+							for (k = 0; k < 6 && !(igpd_goal.areanum = AAS_PointAreaNum(v)); k++) v[2] += 8;
+							VectorCopy(v, igpd_goal.origin);
+							VectorSet(igpd_goal.mins, -8, -8, -8);
+							VectorSet(igpd_goal.maxs, 8, 8, 8);
+						}
+					}
+				}
+				/* ig_paddrillreach: that pad route first (walked, hooked into, flown) */
+				igpd.forcereach = (int) LibVarValue("ig_paddrillreach", "0");
+				if (igpd.forcereach > 0 && igpd.forcereach < aasworld.reachabilitysize && !igpd.landed) {
+					aas_reachability_t *fr = &aasworld.reachability[igpd.forcereach];
+
+					ms->lastreachnum = igpd.forcereach;
+					ms->reachareanum = fr->areanum;
+					ms->reachability_time = now + 5;
+					if (!igpd.launched) {
+						*result = BotTravel_JumpPad(ms, fr);
+						result->traveltype = TRAVEL_WALK;	/* so the pad hook (IG_PadApproach) may run */
+						return 3;
+					}
+					if (!(ms->moveflags & MFL_ONGROUND)) {
+						IG_NotePadFlight(ms->client, fr->end);
+						*result = BotFinishTravel_JumpPad(ms, fr);
+						return 3;
+					}
+					igpd.landed = 1;
+				}
+				return 2;
+			default:
+				if (now - igpd.t0 < 0.5f) return 1;
+				igpd.phase = 0;
+				return 1;
+			}
+		}
+	}
 	switch (igpd.phase) {
 	case 0:		/* place */
 		igpd.reach = list[igpd.idx++ % n];

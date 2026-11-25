@@ -39,6 +39,9 @@ of the License, or (at your option) any later version.
 #include "ai_dmq3.h"
 #include "ai_ig.h"
 #include "chars.h"
+bot_goal_t *IG_PadDrillGoal(int client);	/* IG-43, be_ai_move.c */
+void IG_PadDrillNoteIn(int client);
+int IG_PadDrillPad(int client, vec3_t pad);
 
 /* botlib/be_ig_hook.c */
 void IG_GrappleTravelNote(int client);
@@ -1674,6 +1677,7 @@ static int IG_PadAhead(bot_state_t *bs, bot_goal_t *goal, vec3_t pad)
 {
 	aas_predictroute_t route;
 
+	if (IG_PadDrillPad(bs->client, pad)) return 1;	/* IG-43's pad drill: its route's pad */
 	if (!goal || goal->areanum <= 0 || bs->areanum <= 0) return 0;
 	trap_AAS_PredictRoute(&route, bs->areanum, bs->origin, goal->areanum, bs->tfl, 30, 250,
 						  RSE_USETRAVELTYPE, 0, TFL_JUMPPAD, 0);
@@ -1737,6 +1741,7 @@ static int IG_PadApproach(bot_state_t *bs, bot_goal_t *goal, bot_moveresult_t *m
 		VectorSubtract(ig_padin[c].pad, bs->origin, d);
 		d[2] = 0;
 		BotAI_Print(PRT_MESSAGE, "ig: padin %d dist %.0f\n", c, VectorLength(d));
+		IG_PadDrillNoteIn(c);	/* IG-43's pad drill */
 		ig_padin[c].state = IG_PADIN_HOOKED;
 		ig_padin[c].time = FloatTime();
 		return 1;
@@ -1774,6 +1779,7 @@ void IG_Slingshot(bot_state_t *bs, bot_goal_t *goal, bot_moveresult_t *moveresul
 {
 	int c = bs->client;
 
+	{ bot_goal_t *dg = IG_PadDrillGoal(c); if (dg) goal = dg; }	/* IG-43's pad drill: its goal */
 	/* IG-40: the planner moves the bot; the trick-by-trick code stands down.
 	 * Kept for now: the jump-pad hooks, the lava escape, a fight hook's end. */
 	if (IG_PlanOn()) {
@@ -1789,6 +1795,7 @@ void IG_Slingshot(bot_state_t *bs, bot_goal_t *goal, bot_moveresult_t *moveresul
 			return;
 		}
 		if (IG_PadApproach(bs, goal, moveresult)) return;
+		{ vec3_t dp; if (IG_PadDrillPad(c, dp)) return; }	/* IG-43's pad drill: on its way to the pad */
 		IG_Plan(bs, goal, moveresult);
 		return;
 	}
