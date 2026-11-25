@@ -59,8 +59,8 @@ void EA_IGMove(int client, vec3_t dir, float speed, int jump, int crouch);
 #define PLAN_MAXANCH	16
 #define PLAN_MAXOPT		32
 
-enum { PO_RUN, PO_HOP, PO_SLING, PO_FIRE, PO_HOLD, PO_LETGO, PO_LETGOHOP, PO_HOLDHOP };
-static const char *po_names[] = { "run", "hop", "sling", "fire", "hold", "letgo", "letgohop", "holdhop" };
+enum { PO_RUN, PO_HOP, PO_SLING, PO_FIRE, PO_HOLD, PO_LETGO, PO_LETGOHOP, PO_HOLDHOP, PO_LANDHOP };
+static const char *po_names[] = { "run", "hop", "sling", "fire", "hold", "letgo", "letgohop", "holdhop", "landhop" };
 
 typedef struct {
 	int		kind;
@@ -70,6 +70,7 @@ typedef struct {
 	int		fire;		/* think to fire at; -1 none */
 	int		relafter;	/* let go this many thinks after the hook bites; 0 keep it */
 	int		letgo;		/* let go on the first think */
+	int		landhop;	/* jump pressed coming down, so the landing jumps at once -- once, then run */
 	float	hookmul;	/* the hook price times this: by the anchor's class */
 	float	cost;
 	int		ok;
@@ -88,6 +89,7 @@ typedef struct {
 	vec3_t		lastview;					/* the view the game holds now (last usercmd) */
 	int			hook;						/* own hook now: 0, 1 flying, 2 still */
 	float		hookcost;					/* the price of firing a hook, s */
+	float		flow;						/* s per 300 u/s of average speed kept (ig_planflow) */
 	vec3_t		hookpos, hookdir;
 } igx_t;
 
@@ -98,6 +100,7 @@ static struct {
 	float	flicktime;
 	int		hookout;		/* we fired the hook that is out */
 	int		anchorclass;	/* the flicked anchor's class */
+	int		landhop;		/* a landing hop decided: jump held coming down until it lands */
 	float	anchornz;
 	vec3_t	firedir;		/* ...along this: the flight a flying hook keeps */
 	int		chain;
@@ -234,12 +237,15 @@ static void IGX_Input(igx_t *x, const igopt_t *o, int t, const igpm_t *pm, const
 
 	if (pm->ground) {
 		VectorCopy(routedir, in->wish);
-		in->jump = (t == 0 && o->jump0) || o->hop;
+		in->jump = (t == 0 && o->jump0) || o->hop || (o->landhop && !pm->jumped && (in->letgo || pm->hook < 2));
 	} else {
 		if (pm->hook >= 2) VectorCopy(routedir, in->wish);
 		else IGX_AirWish(pm->vel, routedir, in->wish);
-		/* pressed while coming down, the jump goes off on the landing frame */
-		in->jump = o->hop && pm->vel[2] < 0 && pm->hook < 2;
+		/* pressed while coming down, the jump goes off on the landing frame:
+		 * Billy's slingshot (demo, 2026-11-25) lets go in the air and has jump
+		 * down before he lands -- off the floor again within 8 ms, 860-940 u/s
+		 * kept; a landing without it gives friction the first step */
+		in->jump = (o->hop || (o->landhop && !pm->jumped)) && pm->vel[2] < 0 && (pm->hook < 2 || in->letgo);
 	}
 }
 
@@ -275,8 +281,8 @@ static void IGX_Simulate(igx_t *x, igopt_t *o)
 	igin_t in;
 	vec3_t route, lastroute, end, vh;
 	int t, latch = -1, airjump = -1, half, area, tt;
-	float fm, sm, up, wallpen = 0, along, before, after;
-	int stop = 0;
+	float fm, sm, up, wallpen = 0, along, before, after, flow = 0;
+	int stop = 0, flown = 0;
 
 	IGX_Start(x, &pm);
 	o->ok = 0;
@@ -320,6 +326,8 @@ static void IGX_Simulate(igx_t *x, igopt_t *o)
 		VectorSet(vh, pm.vel[0], pm.vel[1], 0);
 		after = VectorLength(vh);
 		if (pm.blocked && before - after > 200) wallpen += 0.15f * (before - after) / 300;
+		flow += after;
+		flown++;
 		if (pm.pad || pm.teleport) break;	/* the navigation file knows where those go */
 	}
 	if (pm.hook == 1 && pm.hooklost) wallpen += 0.05f;	/* a wasted hook */
@@ -374,6 +382,14 @@ static void IGX_Simulate(igx_t *x, igopt_t *o)
 	if (!IGX_RouteDir(x, end, area, route)) VectorCopy(lastroute, route);
 	along = DotProduct(vh, route);
 	o->cost = pm.time + tt * 0.01f - PLAN_SPEEDBONUS * (along > 330 ? (along - 330) / 300 : 0) + wallpen;	/* what speed is left, if the coast ran out */
+	/* flow: speed kept is worth something beyond the route time -- harder
+	 * to hit, the next slingshot's start (Billy holds 860-930 u/s through
+	 * hop after hop). The average over the flight, not a reading at its
+	 * end, so the score does not drift as the window slides. */
+	if (flown) {
+		flow /= flown;
+		o->cost -= x->flow * (flow > 330 ? (flow > 930 ? 2.0f : (flow - 330) / 300) : 0);
+	}
 	o->ok = 1;
 }
 
@@ -499,6 +515,7 @@ int IG_Plan(bot_state_t *bs, bot_goal_t *goal, bot_moveresult_t *mr)
 	x.tfl = bs->tfl;
 	x.jumpland = trap_Cvar_VariableIntegerValue("ig_jumpland");
 	x.canfire = IG_CanFireHook(c);
+	x.flow = LibVarValue("ig_planflow", "0.2");	/* WIP */
 	x.hookcost = LibVarValue("ig_planhookcost", "0.5") * (1.6f - IG_PlanAffinity(bs)) / (1.6f - 0.55f);
 	VectorCopy(bs->viewangles, x.lastview);
 	if (x.lastview[PITCH] > 180) x.lastview[PITCH] -= 360;
@@ -520,6 +537,7 @@ int IG_Plan(bot_state_t *bs, bot_goal_t *goal, bot_moveresult_t *mr)
 	ours = igp_state[c].active || (x.hook && igp_state[c].hookout);
 	if (!x.hook) igp_state[c].hookout = 0;
 	if (ground && !x.hook) igp_state[c].active = 0;
+	if (ground) igp_state[c].landhop = 0;		/* landed: it jumped, or it is too late */
 
 	/* what the planner does not plan: the stock movement's */
 	if (!ours && ((mr->traveltype & TRAVELTYPE_MASK) != TRAVEL_WALK ||
@@ -536,10 +554,11 @@ int IG_Plan(bot_state_t *bs, bot_goal_t *goal, bot_moveresult_t *mr)
 	}
 
 	/* the options from here */
-#define OPT(K, H, J0, A, F, R, L) do { if (n < PLAN_MAXOPT) { igopt_t *o_ = &opts[n++]; o_->kind = K; o_->hop = H; o_->hookmul = 1; \
+#define OPT(K, H, J0, A, F, R, L) do { if (n < PLAN_MAXOPT) { igopt_t *o_ = &opts[n++]; o_->kind = K; o_->hop = H; o_->hookmul = 1; o_->landhop = 0; \
 	o_->jump0 = J0; o_->anchor = A; o_->fire = F; o_->relafter = R; o_->letgo = L; } } while (0)
 	if (x.hook) {
 		OPT(PO_LETGO, 0, 0, -1, -1, 0, 1);
+		{ OPT(PO_LANDHOP, 0, 0, -1, -1, 0, 1); opts[n - 1].landhop = 1; }	/* let go, hop the landing */
 		OPT(PO_LETGOHOP, 1, 0, -1, -1, 0, 1);
 		for (k = 1; k <= 4; k++) OPT(PO_HOLD, 0, 0, -1, -1, k * k == 16 ? 8 : k, 0);	/* 1, 2, 3, 8 thinks */
 		/* T3, the pull hop: hop off the floor while the hook drags (friction eats the pull) */
@@ -547,6 +566,7 @@ int IG_Plan(bot_state_t *bs, bot_goal_t *goal, bot_moveresult_t *mr)
 	} else {
 		OPT(PO_RUN, 0, 0, -1, -1, 0, 0);
 		OPT(PO_HOP, 1, ground, -1, -1, 0, 0);
+		if (!ground) { OPT(PO_LANDHOP, 0, 0, -1, -1, 0, 0); opts[n - 1].landhop = 1; }	/* hop the next landing */
 		/* flicked onto an anchor last think: it can go now */
 		if (igp_state[c].anchorset && FloatTime() - igp_state[c].flicktime < 0.15f &&
 			FloatTime() - igp_state[c].flicktime > 0.001f && x.canfire) {
@@ -622,8 +642,10 @@ int IG_Plan(bot_state_t *bs, bot_goal_t *goal, bot_moveresult_t *mr)
 		if (o->kind == PO_RUN) {
 			igp_state[c].kind = PO_RUN;
 			igp_state[c].anchorset = 0;
-			if (!ground && igp_state[c].active) {	/* our flight: steer it */
-				EA_IGMove(c, in.wish, 400, 0, 0);
+			if (!ground && igp_state[c].active) {	/* our flight: steer it, and keep a landing hop decided */
+				int j = igp_state[c].landhop && bs->cur_ps.velocity[2] < 0;
+
+				EA_IGMove(c, in.wish, 400, j, 0);
 				igp_state[c].steered = FloatTime();
 				igp_state[c].setmove = 1;
 				VectorCopy(in.wish, igp_state[c].wish);
@@ -633,6 +655,18 @@ int IG_Plan(bot_state_t *bs, bot_goal_t *goal, bot_moveresult_t *mr)
 			igp_state[c].active = 0;
 			return 0;	/* the stock route move */
 		}
+		/* a landing hop is a decision: jump stays down on the way down until
+		 * it lands (decided while rising, the hop was lost whenever a later
+		 * think picked another option: 13% of landings hopped, Billy 100%) */
+		if (o->kind == PO_LANDHOP) igp_state[c].landhop = 1;
+		/* every let-go hops its landing, as Billy's all do, unless that
+		 * landing hop was ruled out (lava, a pit) */
+		if (in.letgo) {
+			for (i = 0; i < n; i++)
+				if (opts[i].kind == PO_LANDHOP && opts[i].ok) igp_state[c].landhop = 1;
+		}
+		if (o->kind == PO_SLING || o->kind == PO_FIRE) igp_state[c].landhop = 0;
+		if (igp_state[c].landhop && !ground && !x.hook && bs->cur_ps.velocity[2] < 0) in.jump = 1;
 		EA_IGMove(c, in.wish, 400, in.jump, 0);
 		igp_state[c].steered = FloatTime();
 		igp_state[c].setmove = 1;
@@ -946,6 +980,37 @@ static void IGX_FightSim(igx_t *x, igfopt_t *o, const vec3_t enemyeye, float rea
 	o->ok = 1;
 }
 
+/* A fight that starts mid-flight: the planner's own flight is still the
+ * planner's until it lands -- steered, its landing hopped -- and its own hook
+ * (a slingshot's) is let go, nothing else would (the fight node does not run
+ * the planner). The stock attack move took over 140 of 330 flights from a
+ * let-go on q2rdm11, and none of them hopped the landing. */
+static int IGX_FightFlight(bot_state_t *bs)
+{
+	int c = bs->client, hs;
+	vec3_t eye, wish, hp;
+
+	if (!IG_PlanOn() || c < 0 || c >= MAX_CLIENTS) return 0;
+	VectorCopy(bs->cur_ps.origin, eye);
+	eye[2] += bs->cur_ps.viewheight;
+	hs = IG_OwnHook(eye, VectorLength(bs->cur_ps.velocity), hp);
+	if (hs && igp_state[c].hookout) {
+		trap_EA_Command(c, LibVarGetString("cmd_grappleoff"));
+		igp_state[c].hookout = 0;
+		igp_state[c].landhop = 1;
+		igp_state[c].active = 1;
+	}
+	if (!igp_state[c].active || bs->cur_ps.groundEntityNum != ENTITYNUM_NONE) {
+		igp_state[c].active = 0;
+		return 0;
+	}
+	VectorSet(wish, bs->cur_ps.velocity[0], bs->cur_ps.velocity[1], 0);
+	if (VectorNormalize(wish) < 1) return 0;
+	EA_IGMove(c, wish, 400, igp_state[c].landhop && bs->cur_ps.velocity[2] < 0, 0);
+	igp_state[c].steered = FloatTime();
+	return 1;
+}
+
 int IG_PlanFight(bot_state_t *bs)
 {
 	igx_t x;
@@ -957,6 +1022,7 @@ int IG_PlanFight(bot_state_t *bs)
 	static const float angles[3] = {0, 45, -45};	/* square, angled in, angled out */
 
 	if (!IG_PlanOn() || c < 0 || c >= MAX_CLIENTS || BotIsDead(bs) || bs->enemy < 0) return 0;
+	if (IGX_FightFlight(bs)) return 1;
 	if (!LibVarValue("ig_planfight", "0")) return 0;	/* off: even with stock fights head to head (IG-40) */
 	/* testing: only odd client numbers fight with the planner, so the two
 	 * fight movements meet in the same matches (ig_pfodd 1) */
