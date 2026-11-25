@@ -518,7 +518,7 @@ int IG_Plan(bot_state_t *bs, bot_goal_t *goal, bot_moveresult_t *mr)
 {
 	igx_t x;
 	igopt_t opts[PLAN_MAXOPT];
-	int n = 0, i, best = -1, pick, c = bs->client, ground, ours, k, groundhop;
+	int n = 0, i, best = -1, pick, c = bs->client, ground, ours, k, groundhop, urge;
 	float bestcost = 1e9f, total, r, w[PLAN_MAXOPT];
 	vec3_t eye, routedir, hookpos;
 	igpm_t pm;
@@ -543,6 +543,7 @@ int IG_Plan(bot_state_t *bs, bot_goal_t *goal, bot_moveresult_t *mr)
 	x.jumpland = trap_Cvar_VariableIntegerValue("ig_jumpland");
 	x.canfire = IG_CanFireHook(c);
 	x.flow = LibVarValue("ig_planflow", "0.2");
+	urge = IG_PlanRepositionUrge(c);
 	x.pullfloor = LibVarValue("ig_planpullfloor", "0.25");
 	/* a slingshot is flown with Billy's finish -- let go before the floor,
 	 * hop the landing -- so the anchors whose line has room to hop score best */
@@ -629,6 +630,10 @@ int IG_Plan(bot_state_t *bs, bot_goal_t *goal, bot_moveresult_t *mr)
 		/* the option under way gets the benefit of the doubt */
 		/* a bot that snapped its view onto a spot hooks it: flicks that came
 		 * to nothing were half of them in v1, a view twitching at walls */
+		/* a reposition urged (a kill, two misses): hook away now (IG-10's
+		 * travelling half, which the old slingshot step did and the planner
+		 * had dropped -- the urge waited for the next fight instead) */
+		if (urge && (opts[i].kind == PO_SLING || opts[i].kind == PO_FIRE)) opts[i].cost -= 0.5f;
 		if (opts[i].kind == PO_FIRE) opts[i].cost -= PLAN_COMMIT;
 		/* a landing hop decided (every let-go decides one) is a promise too,
 		 * kept through the simulation: forced presses instead doubled the
@@ -1029,6 +1034,17 @@ static void IGX_FightSim(igx_t *x, igfopt_t *o, const vec3_t enemyeye, float rea
  * (a slingshot's) is let go, nothing else would (the fight node does not run
  * the planner). The stock attack move took over 140 of 330 flights from a
  * let-go on q2rdm11, and none of them hopped the landing. */
+/* A fight hook let go (ai_ig_sling.c): its flight is the planner's now, so
+ * the landing is hopped -- through IGX_FightFlight's simulation, as every
+ * planner flight's is. The old code hopped after every fight-hook let-go
+ * (IG_Hop), and the planner had dropped it. */
+void IG_PlanTakeFlight(int c)
+{
+	if (c < 0 || c >= MAX_CLIENTS) return;
+	igp_state[c].active = 1;
+	igp_state[c].landhop = 1;
+}
+
 /* The flight on from now, steering along the velocity, jump held coming
  * down when `hop`: lava, slime or a pit before it lands (and hops)? */
 static int IGX_FlightUnsafe(bot_state_t *bs, const vec3_t wish, int hop)

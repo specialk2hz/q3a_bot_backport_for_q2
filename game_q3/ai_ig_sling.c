@@ -1113,11 +1113,23 @@ static void IG_HookMove(bot_state_t *bs, int infight)
 		}
 		trap_EA_Command(c, LibVarGetString("cmd_grappleoff"));
 		BotAI_Print(PRT_MESSAGE, "ig: fighthook release %d latched %d speed %.0f\n", c, f->latched > 0, speed);
-		if (f->latched) IG_HopStart(c);
+		if (f->latched) {
+			IG_HopStart(c);
+			if (IG_PlanOn()) IG_PlanTakeFlight(c);	/* IG-40: the planner flies it and hops its landing */
+		}
 		f->state = IG_FIGHT_NONE;
 		f->cooldown = FloatTime() + IG_FIGHT_COOLDOWN;
 		return;
 	}
+}
+
+/* IG-40: a reposition asked for (after a kill, or two misses): the planner
+ * takes it as a strong reason to hook away now, and it is spent. */
+int IG_PlanRepositionUrge(int c)
+{
+	if (c < 0 || c >= MAX_CLIENTS || !ig_fight[c].urge) return 0;
+	ig_fight[c].urge = 0;
+	return 1;
 }
 
 /* From AINode_Battle_Fight: dodges, and repositions. */
