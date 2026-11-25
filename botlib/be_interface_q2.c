@@ -137,6 +137,7 @@ extern void BotUpdateInput(bot_state_t *bs, float thinktime);
 extern void IG_PredCheck(bot_state_t *bs, const bot_input_t *bi); /* IG: ai_ig_pred.c */
 extern void IG_PlanTick(bot_state_t *bs);  /* IG: ai_ig_plan.c */
 extern int  IG_PlanViewSet(int c);
+extern int  IG_PlanFlightView(bot_state_t *bs);
 extern void IG_PlanGuard(bot_state_t *bs, bot_input_t *bi);
 extern void BotChooseWeapon(bot_state_t *bs);
 extern int  AINode_Battle_Fight(bot_state_t *bs);
@@ -2566,7 +2567,17 @@ static int Q2BotAI(int client, float thinktime)
      * frame. Only yaw is touched, so ladder and swimming views (which need
      * pitch) are unaffected; a bot that is not walking keeps looking
      * around freely. */
-    if (bs->enemy < 0 && !IG_PlanViewSet(client)) {   /* IG: not over a planner's flick (IG-40) */
+    if (LibVarValue("ig_viewdebug", "0")) {   /* IG: diagnostic, the view each think */
+        bot_input_t w;
+
+        EA_GetInput(client, thinktime, &w);
+        botimport.Print(PRT_MESSAGE, "igview %d view %.1f ideal %.1f move %.1f speed %.0f enemy %d planview %d flags %d\n", client,
+                        bs->viewangles[YAW], bs->ideal_viewangles[YAW], atan2(w.dir[1], w.dir[0]) * 180 / M_PI, w.speed, bs->enemy,
+                        IG_PlanViewSet(client), bs->flags);
+    }
+    if (bs->enemy < 0 && !IG_PlanViewSet(client) && IG_PlanFlightView(bs)) {
+        /* IG: a planner-steered flight looks where a strafing player looks (IG-40) */
+    } else if (bs->enemy < 0 && !IG_PlanViewSet(client)) {   /* IG: not over a planner's flick (IG-40) */
         bot_input_t walk;
 
         EA_GetInput(client, thinktime, &walk);

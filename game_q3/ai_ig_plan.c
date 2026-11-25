@@ -1573,3 +1573,34 @@ int IG_PlanPadSlingOn(void)
 {
 	return IG_PlanOn() && LibVarValue("ig_planpadsling", "0") != 0;
 }
+
+/* The view on a flight the planner steers (libvar ig_planflightview, default
+ * 1). With no enemy the stock look-ahead (or a random roam spot), clamped near
+ * the push direction (be_interface_q2.c), chased a target that jumped around
+ * while the push sat 70-90 degrees off the travel at speed: the view turned at
+ * its 360 deg/s limit nonstop and the model spun, strafing sideways or
+ * backwards (Billy: "the model converts into strafe jumping backwards"). A
+ * player holds forward and a side key, so his view is 45 degrees from the push,
+ * toward where he is going: that, and level. */
+int IG_PlanFlightView(bot_state_t *bs)
+{
+	int c = bs->client;
+	vec3_t vh;
+	float sp, vyaw, wyaw, d;
+
+	if (!IG_PlanOn() || c < 0 || c >= MAX_CLIENTS || !LibVarValue("ig_planflightview", "2")) return 0;
+	if (FloatTime() - igp_state[c].steered > 0.001f || !igp_state[c].setmove) return 0;
+	VectorSet(vh, bs->cur_ps.velocity[0], bs->cur_ps.velocity[1], 0);
+	sp = VectorNormalize(vh);
+	if (sp < 250) return 0;
+	vyaw = atan2(vh[1], vh[0]) * 180 / M_PI;
+	wyaw = atan2(igp_state[c].wish[1], igp_state[c].wish[0]) * 180 / M_PI;
+	d = AngleMod(wyaw - vyaw + 180) - 180;	/* the push's side of the travel */
+	/* Billy's route: his view 5 degrees (median) off his travel, the strafe in
+	 * the keys; mode 2 (default): the travel, leaning a little toward the push;
+	 * mode 1: 45 degrees from the push (28 degrees off the travel) */
+	if (LibVarValue("ig_planflightview", "2") >= 2) bs->ideal_viewangles[YAW] = AngleMod(vyaw + d * 0.1f);
+	else bs->ideal_viewangles[YAW] = AngleMod(fabs(d) < 45 ? vyaw : wyaw - (d > 0 ? 45 : -45));
+	bs->ideal_viewangles[PITCH] = 0;
+	return 1;
+}
