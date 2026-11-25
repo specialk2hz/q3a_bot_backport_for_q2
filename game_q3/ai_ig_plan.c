@@ -56,7 +56,7 @@ void EA_IGMove(int client, vec3_t dir, float speed, int jump, int crouch);
  * seconds, scaled by the bot's hook affinity (a grapple lover pays less):
  * libvar ig_planhookcost (s at the middle affinity, 0.55). */
 #define PLAN_COAST		15		/* up to 1.5 s more, running the route, until the extra speed is spent */
-#define PLAN_MAXANCH	12
+#define PLAN_MAXANCH	16
 #define PLAN_MAXOPT		32
 
 enum { PO_RUN, PO_HOP, PO_SLING, PO_FIRE, PO_HOLD, PO_LETGO, PO_LETGOHOP, PO_HOLDHOP };
@@ -70,6 +70,7 @@ typedef struct {
 	int		fire;		/* think to fire at; -1 none */
 	int		relafter;	/* let go this many thinks after the hook bites; 0 keep it */
 	int		letgo;		/* let go on the first think */
+	float	hookmul;	/* the hook price times this: by the anchor's class */
 	float	cost;
 	int		ok;
 } igopt_t;
@@ -80,6 +81,8 @@ typedef struct {
 	vec3_t		goalorg;
 	vec3_t		anchors[PLAN_MAXANCH];
 	vec3_t		anchorview[PLAN_MAXANCH];	/* pitch, yaw from the eye now */
+	int			anchorclass[PLAN_MAXANCH];	/* IGA_SLING, IGA_UP, IGA_SIDE */
+	bot_goal_t	*goal;
 	int			numanchors;
 	vec3_t		lastview;					/* the view the game holds now (last usercmd) */
 	int			hook;						/* own hook now: 0, 1 flying, 2 still */
@@ -93,6 +96,7 @@ static struct {
 	vec3_t	anchor, flickview;
 	float	flicktime;
 	int		hookout;		/* we fired the hook that is out */
+	int		anchorclass;	/* the flicked anchor's class */
 	vec3_t	firedir;		/* ...along this: the flight a flying hook keeps */
 	int		chain;
 	float	lastlog;
@@ -292,7 +296,7 @@ static void IGX_Simulate(igx_t *x, igopt_t *o)
 		if (in.letgo) IG_PmoveHookRelease(&pm);
 		if (in.fire) {
 			IG_PmoveHookFire(&pm, x->lastview[PITCH], x->lastview[YAW]);
-			wallpen += x->hookcost;
+			wallpen += x->hookcost * (o->hookmul > 0 ? o->hookmul : 1);
 		}
 		IGX_Moves(in.wish, in.view[YAW], &fm, &sm);
 		VectorSet(vh, pm.vel[0], pm.vel[1], 0);
@@ -373,33 +377,66 @@ static void IGX_Simulate(igx_t *x, igopt_t *o)
 
 /* -------------------------------------------------------------- anchors */
 
-static void IGX_Anchors(igx_t *x, const vec3_t routedir)
+/* Anchors come in three classes, priced apart (Billy: "more slingshots and
+ * fewer random wall grapples for no reason"):
+ *   IGA_SLING  along the route, 6-18 degrees down, 250+ units: the floor or a
+ *              far low wall ahead -- his slingshot (median 275 units, 14 down);
+ *              price x ig_planslingmul (0.3)
+ *   IGA_UP     25 degrees up, only where the route climbs 48+ within 500
+ *              units: the stairwell and ledge hook (T6); x ig_planupmul (1)
+ *   IGA_SIDE   40 degrees off the route: a turn around a corner, worth it only
+ *              when it clearly pays; x ig_plansidemul (2) */
+enum { IGA_SLING, IGA_UP, IGA_SIDE };
+static const char *iga_names[] = { "sling", "up", "side" };
+
+static void IGX_AnchorTry(igx_t *x, float pitch, float yaw, float mind, int cls)
 {
-	/* + is down; the -25 row is the stairwell and ledge hook (Billy's T6) */
-	static const float yaws[3] = {-25, 0, 25}, pitches[4] = {20, 8, -8, -25};
 	bot_state_t *bs = x->bs;
-	float baseyaw = atan2(routedir[1], routedir[0]) * 180 / M_PI, maxd = 900;
-	int i, j, sky = trap_Cvar_VariableIntegerValue("ig_hooksky");
 	vec3_t ang, dir, end, d;
 	bsp_trace_t tr;
 
+	if (x->numanchors >= PLAN_MAXANCH) return;
+	VectorSet(ang, pitch, yaw, 0);
+	AngleVectors(ang, dir, NULL, NULL);
+	VectorMA(bs->eye, 900, dir, end);
+	BotAI_Trace(&tr, bs->eye, NULL, NULL, end, bs->entitynum, CONTENTS_SOLID | CONTENTS_LAVA | CONTENTS_SLIME);
+	if (tr.fraction >= 1 || tr.startsolid) return;
+	if (tr.contents & (CONTENTS_LAVA | CONTENTS_SLIME)) return;
+	if ((tr.surface.flags & SURF_SKY) && !trap_Cvar_VariableIntegerValue("ig_hooksky")) return;
+	VectorSubtract(tr.endpos, bs->eye, d);
+	if (VectorLength(d) < mind) return;
+	VectorCopy(tr.endpos, x->anchors[x->numanchors]);
+	vectoangles(d, x->anchorview[x->numanchors]);
+	if (x->anchorview[x->numanchors][PITCH] > 180) x->anchorview[x->numanchors][PITCH] -= 360;
+	x->anchorclass[x->numanchors] = cls;
+	x->numanchors++;
+}
+
+static void IGX_Anchors(igx_t *x, const vec3_t routedir)
+{
+	static const float slingyaw[3] = {-12, 0, 12}, slingpitch[3] = {6, 12, 18};	/* + is down */
+	float baseyaw = atan2(routedir[1], routedir[0]) * 180 / M_PI;
+	int i, j;
+	vec3_t ahead;
+
 	x->numanchors = 0;
 	for (i = 0; i < 3; i++)
-		for (j = 0; j < 4; j++) {
-			VectorSet(ang, pitches[j], baseyaw + yaws[i], 0);
-			AngleVectors(ang, dir, NULL, NULL);
-			VectorMA(bs->eye, maxd, dir, end);
-			BotAI_Trace(&tr, bs->eye, NULL, NULL, end, bs->entitynum, CONTENTS_SOLID | CONTENTS_LAVA | CONTENTS_SLIME);
-			if (tr.fraction >= 1 || tr.startsolid) continue;
-			if (tr.contents & (CONTENTS_LAVA | CONTENTS_SLIME)) continue;
-			if ((tr.surface.flags & SURF_SKY) && !sky) continue;
-			VectorSubtract(tr.endpos, bs->eye, d);
-			if (VectorLength(d) < 200) continue;
-			VectorCopy(tr.endpos, x->anchors[x->numanchors]);
-			vectoangles(d, x->anchorview[x->numanchors]);
-			if (x->anchorview[x->numanchors][PITCH] > 180) x->anchorview[x->numanchors][PITCH] -= 360;
-			x->numanchors++;
-		}
+		for (j = 0; j < 3; j++)
+			IGX_AnchorTry(x, slingpitch[j], baseyaw + slingyaw[i], 250, IGA_SLING);
+	if (x->goal && trap_BotMovementViewTarget(x->bs->ms, x->goal, x->tfl, 500, ahead) &&
+		ahead[2] - x->bs->origin[2] >= 48)
+		for (i = -1; i <= 1; i++)
+			IGX_AnchorTry(x, -25, baseyaw + 25 * i, 200, IGA_UP);
+	for (i = -1; i <= 1; i += 2) {
+		IGX_AnchorTry(x, 8, baseyaw + 40 * i, 200, IGA_SIDE);
+		IGX_AnchorTry(x, -8, baseyaw + 40 * i, 200, IGA_SIDE);
+	}
+}
+
+static float IGX_ClassMul(int cls)
+{
+	return cls == IGA_SLING ? LibVarValue("ig_planslingmul", "0.3") :
+		   cls == IGA_UP ? LibVarValue("ig_planupmul", "1") : LibVarValue("ig_plansidemul", "2");
 }
 
 /* ------------------------------------------------------------- the plan */
@@ -448,6 +485,7 @@ int IG_Plan(bot_state_t *bs, bot_goal_t *goal, bot_moveresult_t *mr)
 	Com_Memset(&x, 0, sizeof(x));
 	x.bs = bs;
 	x.goalarea = goal->areanum;
+	x.goal = goal;
 	VectorCopy(goal->origin, x.goalorg);
 	x.tfl = bs->tfl;
 	x.jumpland = trap_Cvar_VariableIntegerValue("ig_jumpland");
@@ -489,7 +527,7 @@ int IG_Plan(bot_state_t *bs, bot_goal_t *goal, bot_moveresult_t *mr)
 	}
 
 	/* the options from here */
-#define OPT(K, H, J0, A, F, R, L) do { if (n < PLAN_MAXOPT) { igopt_t *o_ = &opts[n++]; o_->kind = K; o_->hop = H; \
+#define OPT(K, H, J0, A, F, R, L) do { if (n < PLAN_MAXOPT) { igopt_t *o_ = &opts[n++]; o_->kind = K; o_->hop = H; o_->hookmul = 1; \
 	o_->jump0 = J0; o_->anchor = A; o_->fire = F; o_->relafter = R; o_->letgo = L; } } while (0)
 	if (x.hook) {
 		OPT(PO_LETGO, 0, 0, -1, -1, 0, 1);
@@ -503,12 +541,12 @@ int IG_Plan(bot_state_t *bs, bot_goal_t *goal, bot_moveresult_t *mr)
 		/* flicked onto an anchor last think: it can go now */
 		if (igp_state[c].anchorset && FloatTime() - igp_state[c].flicktime < 0.15f &&
 			FloatTime() - igp_state[c].flicktime > 0.001f && x.canfire) {
-			OPT(PO_FIRE, 0, 0, -1, 0, 3, 0);
+			{ OPT(PO_FIRE, 0, 0, -1, 0, 3, 0); opts[n - 1].hookmul = IGX_ClassMul(igp_state[c].anchorclass); }
 		}
 		if (x.canfire) {
 			IGX_Anchors(&x, routedir);
 			for (i = 0; i < x.numanchors; i++)
-				OPT(PO_SLING, 0, ground, i, 1, 3, 0);
+				{ OPT(PO_SLING, 0, ground, i, 1, 3, 0); opts[n - 1].hookmul = IGX_ClassMul(x.anchorclass[i]); }
 		}
 	}
 #undef OPT
@@ -595,6 +633,7 @@ int IG_Plan(bot_state_t *bs, bot_goal_t *goal, bot_moveresult_t *mr)
 			IGX_Flick(bs, x.anchorview[o->anchor]);
 			VectorCopy(x.anchorview[o->anchor], igp_state[c].flickview);
 			VectorCopy(x.anchors[o->anchor], igp_state[c].anchor);
+			igp_state[c].anchorclass = x.anchorclass[o->anchor];
 			igp_state[c].flicktime = FloatTime();
 			igp_state[c].anchorset = 1;
 		} else if (o->kind == PO_FIRE) {
@@ -610,8 +649,8 @@ int IG_Plan(bot_state_t *bs, bot_goal_t *goal, bot_moveresult_t *mr)
 			igp_state[c].anchorset = 0;
 			AngleVectors(x.lastview, igp_state[c].firedir, NULL, NULL);
 			VectorSubtract(igp_state[c].anchor, eye, d);
-			BotAI_Print(PRT_MESSAGE, "ig: slingshot %d length %.0f chain %d air %d\n", c, VectorLength(d),
-						igp_state[c].chain++, !ground);
+			BotAI_Print(PRT_MESSAGE, "ig: slingshot %d length %.0f chain %d air %d class %s\n", c, VectorLength(d),
+						igp_state[c].chain++, !ground, iga_names[igp_state[c].anchorclass]);
 			if (trap_Cvar_VariableIntegerValue("ig_plandebug") == 2)
 				BotAI_Print(PRT_MESSAGE, "igfire %d view %.1f %.1f anchor %.0f %.0f %.0f eye %.0f %.0f %.0f\n", c,
 							x.lastview[PITCH], x.lastview[YAW], igp_state[c].anchor[0], igp_state[c].anchor[1],
