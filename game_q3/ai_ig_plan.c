@@ -82,6 +82,7 @@ typedef struct {
 	vec3_t		anchors[PLAN_MAXANCH];
 	vec3_t		anchorview[PLAN_MAXANCH];	/* pitch, yaw from the eye now */
 	int			anchorclass[PLAN_MAXANCH];	/* IGA_SLING, IGA_UP, IGA_SIDE */
+	float		anchornz[PLAN_MAXANCH];		/* the surface's normal z: > 0.7 floor */
 	bot_goal_t	*goal;
 	int			numanchors;
 	vec3_t		lastview;					/* the view the game holds now (last usercmd) */
@@ -97,6 +98,7 @@ static struct {
 	float	flicktime;
 	int		hookout;		/* we fired the hook that is out */
 	int		anchorclass;	/* the flicked anchor's class */
+	float	anchornz;
 	vec3_t	firedir;		/* ...along this: the flight a flying hook keeps */
 	int		chain;
 	float	lastlog;
@@ -405,16 +407,23 @@ static void IGX_AnchorTry(igx_t *x, float pitch, float yaw, float mind, int cls)
 	if ((tr.surface.flags & SURF_SKY) && !trap_Cvar_VariableIntegerValue("ig_hooksky")) return;
 	VectorSubtract(tr.endpos, bs->eye, d);
 	if (VectorLength(d) < mind) return;
+	/* a slingshot hooks the floor ahead, or a far wall: a wall at a
+	 * corridor's end or turn 400 units out was most of q2rdm4's "random
+	 * wall grapples" (575 of 898 slingshots there) */
+	if (cls == IGA_SLING && tr.plane.normal[2] <= 0.7f && VectorLength(d) < 600) return;
 	VectorCopy(tr.endpos, x->anchors[x->numanchors]);
 	vectoangles(d, x->anchorview[x->numanchors]);
 	if (x->anchorview[x->numanchors][PITCH] > 180) x->anchorview[x->numanchors][PITCH] -= 360;
 	x->anchorclass[x->numanchors] = cls;
+	x->anchornz[x->numanchors] = tr.plane.normal[2];
 	x->numanchors++;
 }
 
 static void IGX_Anchors(igx_t *x, const vec3_t routedir)
 {
-	static const float slingyaw[3] = {-12, 0, 12}, slingpitch[3] = {6, 12, 18};	/* + is down */
+	/* + is down. From the eye on the ground (46 up) 12 down meets the floor
+	 * 220 units out; the bot jumps before it fires, so the hook bites further */
+	static const float slingyaw[3] = {-12, 0, 12}, slingpitch[3] = {4, 8, 12};
 	float baseyaw = atan2(routedir[1], routedir[0]) * 180 / M_PI;
 	int i, j;
 	vec3_t ahead;
@@ -422,7 +431,7 @@ static void IGX_Anchors(igx_t *x, const vec3_t routedir)
 	x->numanchors = 0;
 	for (i = 0; i < 3; i++)
 		for (j = 0; j < 3; j++)
-			IGX_AnchorTry(x, slingpitch[j], baseyaw + slingyaw[i], 250, IGA_SLING);
+			IGX_AnchorTry(x, slingpitch[j], baseyaw + slingyaw[i], 180, IGA_SLING);
 	if (x->goal && trap_BotMovementViewTarget(x->bs->ms, x->goal, x->tfl, 500, ahead) &&
 		ahead[2] - x->bs->origin[2] >= 48)
 		for (i = -1; i <= 1; i++)
@@ -634,6 +643,7 @@ int IG_Plan(bot_state_t *bs, bot_goal_t *goal, bot_moveresult_t *mr)
 			VectorCopy(x.anchorview[o->anchor], igp_state[c].flickview);
 			VectorCopy(x.anchors[o->anchor], igp_state[c].anchor);
 			igp_state[c].anchorclass = x.anchorclass[o->anchor];
+			igp_state[c].anchornz = x.anchornz[o->anchor];
 			igp_state[c].flicktime = FloatTime();
 			igp_state[c].anchorset = 1;
 		} else if (o->kind == PO_FIRE) {
@@ -649,8 +659,9 @@ int IG_Plan(bot_state_t *bs, bot_goal_t *goal, bot_moveresult_t *mr)
 			igp_state[c].anchorset = 0;
 			AngleVectors(x.lastview, igp_state[c].firedir, NULL, NULL);
 			VectorSubtract(igp_state[c].anchor, eye, d);
-			BotAI_Print(PRT_MESSAGE, "ig: slingshot %d length %.0f chain %d air %d class %s\n", c, VectorLength(d),
-						igp_state[c].chain++, !ground, iga_names[igp_state[c].anchorclass]);
+			BotAI_Print(PRT_MESSAGE, "ig: slingshot %d length %.0f chain %d air %d class %s %s\n", c, VectorLength(d),
+						igp_state[c].chain++, !ground, iga_names[igp_state[c].anchorclass],
+						igp_state[c].anchornz > 0.7f ? "floor" : igp_state[c].anchornz < -0.7f ? "ceiling" : "wall");
 			if (trap_Cvar_VariableIntegerValue("ig_plandebug") == 2)
 				BotAI_Print(PRT_MESSAGE, "igfire %d view %.1f %.1f anchor %.0f %.0f %.0f eye %.0f %.0f %.0f\n", c,
 							x.lastview[PITCH], x.lastview[YAW], igp_state[c].anchor[0], igp_state[c].anchor[1],
