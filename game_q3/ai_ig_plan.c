@@ -104,6 +104,7 @@ static struct {
 	int		hookout;		/* we fired the hook that is out */
 	int		anchorclass;	/* the flicked anchor's class */
 	int		landhop;		/* a landing hop decided: jump held coming down until it lands */
+	int		fightside;		/* the strafe side in a fight's air time, swapped every think */
 	float	anchornz;
 	vec3_t	firedir;		/* ...along this: the flight a flying hook keeps */
 	int		chain;
@@ -205,7 +206,13 @@ static void IGX_AirWish(const vec3_t vel, const vec3_t route, vec3_t wish)
 	}
 	theta = acos(285.0f / sp > 1 ? 1 : 285.0f / sp);
 	a = acos(DotProduct(vh, route) > 1 ? 1 : DotProduct(vh, route) < -1 ? -1 : DotProduct(vh, route));
-	if (a <= theta) {
+	/* Always at the strafe-jump angle, on the route's side -- also when
+	 * the route runs straight ahead: wishing along the velocity above 300
+	 * adds nothing in Q2, and that was most hops (planner chains gained 2
+	 * u/s a second, Billy's route8 session 58). The side follows the route,
+	 * so a straight run swings across it, the way he strafes. Under 300
+	 * u/s, or with the route more than 90 degrees off, the route itself. */
+	if (sp < 300 || a > M_PI / 2) {
 		VectorCopy(route, wish);
 		return;
 	}
@@ -801,6 +808,17 @@ static void IGX_InputCheck(bot_state_t *bs, const bot_input_t *bi)
 	int c = bs->client, jump = (bi->actionflags & (ACTION_JUMP | ACTION_DELAYEDJUMP)) != 0;
 	vec3_t d;
 
+	if (trap_Cvar_VariableIntegerValue("ig_plandebug") == 4 && bs->cur_ps.groundEntityNum == ENTITYNUM_NONE) {
+		vec3_t vh, dh;
+		float sp = 0, ang = -1;
+
+		VectorSet(vh, bs->cur_ps.velocity[0], bs->cur_ps.velocity[1], 0);
+		VectorSet(dh, bi->dir[0], bi->dir[1], 0);
+		sp = VectorNormalize(vh);
+		if (VectorNormalize(dh) > 0.01f && sp > 1 && bi->speed > 0) ang = RAD2DEG(acos(DotProduct(vh, dh) > 1 ? 1 : DotProduct(vh, dh)));
+		BotAI_Print(PRT_MESSAGE, "igair %d steered %d node %s speed %.0f input %.0f angle %.0f\n", c,
+					FloatTime() - igp_state[c].steered < 0.001f, igp_node[c], sp, bi->speed, ang);
+	}
 	if (trap_Cvar_VariableIntegerValue("ig_plandebug") != 2 || FloatTime() - igp_state[c].steered > 0.001f) return;
 	VectorSet(d, bi->dir[0], bi->dir[1], 0);
 	VectorNormalize(d);
@@ -812,7 +830,7 @@ static void IGX_InputCheck(bot_state_t *bs, const bot_input_t *bi)
 
 void IG_PlanGuard(bot_state_t *bs, bot_input_t *bi)
 {
-	if (bs->client >= 0 && bs->client < MAX_CLIENTS) IGX_InputCheck(bs, bi);
+	if (bs->client >= 0 && bs->client < MAX_CLIENTS) IGX_InputCheck(bs, bi);	/* diagnostics */
 	igx_t x;
 	vec3_t eye, back, zero = {0, 0, 0};
 	int c = bs->client, jump, crouch;
@@ -1091,12 +1109,30 @@ static int IGX_FightFlight(bot_state_t *bs)
 		igp_state[c].landhop = 1;
 		igp_state[c].active = 1;
 	}
-	if (!igp_state[c].active || bs->cur_ps.groundEntityNum != ENTITYNUM_NONE) {
+	if (bs->cur_ps.groundEntityNum != ENTITYNUM_NONE) {
 		igp_state[c].active = 0;
 		return 0;
 	}
-	VectorSet(wish, bs->cur_ps.velocity[0], bs->cur_ps.velocity[1], 0);
-	if (VectorNormalize(wish) < 1) return 0;
+	if (hs) return 0;						/* a fight hook's: its own code */
+	/* In the air in a fight -- the planner's flight or any other: strafe at
+	 * the strafe-jump angle, the side swapped every think so the path runs
+	 * straight. Air time in fights was 40% of all a bot's, and it either
+	 * pushed along its velocity (no speed in Q2 above 300) or nothing (the
+	 * stock attack move), so it gained nothing; Billy gains 4-8 u/s every
+	 * 50 ms in the air. */
+	{
+		vec3_t vh;
+		float sp, th, s;
+
+		VectorSet(vh, bs->cur_ps.velocity[0], bs->cur_ps.velocity[1], 0);
+		sp = VectorNormalize(vh);
+		if (sp < 1) return 0;
+		igp_state[c].fightside = -igp_state[c].fightside;
+		if (!igp_state[c].fightside) igp_state[c].fightside = 1;
+		th = sp > 300 ? acos(285.0f / sp) : 0;
+		s = sin(th) * igp_state[c].fightside;
+		VectorSet(wish, vh[0] * cos(th) - vh[1] * s, vh[0] * s + vh[1] * cos(th), 0);
+	}
 	/* flown first, as everything else: the hop if it is safe, else none, else
 	 * the stock attack move and the guard (unchecked, this raised q2rdm11's
 	 * lava trips from 0.195 to 0.29 a bot-minute) */
