@@ -1073,6 +1073,9 @@ static struct {
 	float	until;			/* kept until then */
 	float	lastshot;
 	int		shooting;
+	float	range;			/* the range this fight wants (ig_pfstance) */
+	float	rangeuntil;
+	int		rangeenemy;
 } igf[MAX_CLIENTS];
 
 typedef struct {
@@ -1099,7 +1102,7 @@ static float igf_lat, igf_peek;	/* tuning (libvars ig_pflat, ig_pfpeek), read on
  * hunt or high-ground point, or the item it was after -- against where it is
  * now (ig_pfroute, per second of travel saved), and the higher ground
  * (ig_pfhigh, at 200+ units above the enemy). igf_tt0: travel time from here. */
-static float igf_route, igf_high, igf_near, igf_nearat;
+static float igf_route, igf_high, igf_near, igf_nearat, igf_range;
 static int igf_tt0;
 
 static void IGX_FightSim(igx_t *x, igfopt_t *o, const vec3_t enemyeye, float ready, float skill)
@@ -1143,7 +1146,13 @@ static void IGX_FightSim(igx_t *x, igfopt_t *o, const vec3_t enemyeye, float rea
 		/* closing in: the stock attack move walks to 140 units, and a rail's
 		 * aim error is an angle, so the nearer, the surer (ig_pfnear, per
 		 * think per 1000 units beyond ig_pfnearat) */
-		if (igf_near > 0 && d > igf_nearat) cost += igf_near * (d - igf_nearat) / 1000;
+		if (igf_near > 0) {
+			if (igf_range > 0) {		/* a range to hold, either side of it */
+				float off = fabs(d - igf_range) - 150;
+
+				if (off > 0) cost += igf_near * off / 1000;
+			} else if (d > igf_nearat) cost += igf_near * (d - igf_nearat) / 1000;
+		}
 	}
 	if (IGX_EndUnsafe(x, &pm)) return;
 	if (igf_route > 0 && x->goalarea && igf_tt0) {
@@ -1314,6 +1323,24 @@ int IG_PlanFight(bot_state_t *bs)
 	igf_high = LibVarValue("ig_pfhigh", "0.03");
 	igf_near = LibVarValue("ig_pfnear", "0");
 	igf_nearat = LibVarValue("ig_pfnearat", "300");
+	/* ig_pfstance 1 (Billy: "railgun is about angles and keeping distance
+	 * sometimes"): not always closing in. Each fight -- a new enemy, or every
+	 * 3-6 s -- picks a range to hold: close 250, mid 550 or long 900, the odds
+	 * from the character's aggression (close 0.15 + 0.5 a, long 0.45 - 0.4 a). */
+	igf_range = 0;
+	if (LibVarValue("ig_pfstance", "0")) {
+		if (igf[c].rangeenemy != bs->enemy || FloatTime() > igf[c].rangeuntil || igf[c].rangeuntil > FloatTime() + 10) {
+			float a = trap_Characteristic_BFloat(bs->character, CHARACTERISTIC_AGGRESSION, 0, 1), r2 = random();
+			float pc = 0.15f + 0.5f * a, pl = 0.45f - 0.4f * a;
+
+			igf[c].range = r2 < pc ? 250 : r2 < 1 - pl ? 550 : 900;
+			igf[c].rangeenemy = bs->enemy;
+			igf[c].rangeuntil = FloatTime() + 3 + random() * 3;
+			if (trap_Cvar_VariableIntegerValue("ig_plandebug") >= 1)
+				BotAI_Print(PRT_MESSAGE, "igstance %d range %.0f aggr %.2f\n", c, igf[c].range, a);
+		}
+		igf_range = igf[c].range;
+	}
 	igf_tt0 = 0;
 	if (igf_route > 0) {
 		bot_goal_t goal;
