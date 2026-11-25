@@ -349,6 +349,7 @@ void IG_Pmove(igpm_t *p, float fmove, float smove, float upmove, float pitch, fl
 		p->vel[2] += 270;
 		if (p->vel[2] < 270) p->vel[2] = 270;
 		p->jumped = 1;
+		p->jumps++;
 	}
 
 	/* PM_Friction: ground only (water is out of scope) */

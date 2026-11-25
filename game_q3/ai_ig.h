@@ -37,6 +37,7 @@ typedef struct {
 	float	hookfly, hookpull, hookflytime;
 	int		steps;	/* pmoves run; the hook flies after every second (the game frame's end) */
 	int		area, pad, teleport;	/* the navigation area now; entered a jump pad / teleporter (sticky) */
+	int		jumps;					/* jumps made over the run */
 } igpm_t;
 void IG_PmoveHookFire(igpm_t *p, float pitch, float yaw);
 void IG_PmoveHookRelease(igpm_t *p);

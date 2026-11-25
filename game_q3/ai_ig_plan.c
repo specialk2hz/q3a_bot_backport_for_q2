@@ -90,6 +90,9 @@ typedef struct {
 	int			hook;						/* own hook now: 0, 1 flying, 2 still */
 	float		hookcost;					/* the price of firing a hook, s */
 	float		flow;						/* s per 300 u/s of average speed kept (ig_planflow) */
+	float		pullfloor;					/* s per 50 ms pulled along the floor (ig_planpullfloor) */
+	int			released, reljumps;			/* in a simulation: the hook let go, and the jumps made by then */
+	int			slinghop;					/* slingshots are flown with Billy's finish (ig_planslinghop) */
 	vec3_t		hookpos, hookdir;
 } igx_t;
 
@@ -234,10 +237,22 @@ static void IGX_Input(igx_t *x, const igopt_t *o, int t, const igpm_t *pm, const
 	if (t == 0 && o->letgo) in->letgo = 1;
 	if (t == o->fire) in->fire = 1;
 	if (o->relafter > 0 && latch >= 0 && t - latch >= o->relafter) in->letgo = 1;
+	/* a slingshot lets go before the pull drags it onto the floor (Billy, 5
+	 * of 5): coming down, and the floor within a think's fall */
+	if ((o->kind == PO_SLING || o->kind == PO_FIRE) && latch >= 0 && t > latch && pm->hook >= 2 && !pm->ground && pm->vel[2] < 0) {
+		bsp_trace_t tr;
+		vec3_t down, mins = {-16, -16, -24}, maxs = {16, 16, 32}, org;
+
+		VectorCopy(pm->org, org);
+		VectorMA(org, 0.12f, pm->vel, down);
+		down[2] -= 4;
+		BotAI_Trace(&tr, org, mins, maxs, down, x->bs->entitynum, CONTENTS_SOLID | CONTENTS_PLAYERCLIP);
+		if (tr.fraction < 1 && tr.plane.normal[2] > 0.7f) in->letgo = 1;
+	}
 
 	if (pm->ground) {
 		VectorCopy(routedir, in->wish);
-		in->jump = (t == 0 && o->jump0) || o->hop || (o->landhop && !pm->jumped && (in->letgo || pm->hook < 2));
+		in->jump = (t == 0 && o->jump0) || o->hop || (o->landhop && (x->released || in->letgo) && pm->jumps == x->reljumps && (in->letgo || pm->hook < 2));
 	} else {
 		if (pm->hook >= 2) VectorCopy(routedir, in->wish);
 		else IGX_AirWish(pm->vel, routedir, in->wish);
@@ -245,7 +260,7 @@ static void IGX_Input(igx_t *x, const igopt_t *o, int t, const igpm_t *pm, const
 		 * Billy's slingshot (demo, 2026-11-25) lets go in the air and has jump
 		 * down before he lands -- off the floor again within 8 ms, 860-940 u/s
 		 * kept; a landing without it gives friction the first step */
-		in->jump = (o->hop || (o->landhop && !pm->jumped)) && pm->vel[2] < 0 && (pm->hook < 2 || in->letgo);
+		in->jump = (o->hop || (o->landhop && (x->released || in->letgo) && pm->jumps == x->reljumps)) && pm->vel[2] < 0 && (pm->hook < 2 || in->letgo);
 	}
 }
 
@@ -286,6 +301,8 @@ static void IGX_Simulate(igx_t *x, igopt_t *o)
 
 	IGX_Start(x, &pm);
 	o->ok = 0;
+	x->released = !pm.hook;
+	x->reljumps = 0;
 	if (!IGX_RouteDir(x, pm.org, pm.area, lastroute)) {
 		AngleVectors(x->bs->viewangles, lastroute, NULL, NULL);
 		lastroute[2] = 0;
@@ -300,8 +317,12 @@ static void IGX_Simulate(igx_t *x, igopt_t *o)
 		/* on the ground where the route takes a step of its own: the stock
 		 * movement takes it from here, and the travel time counts it */
 		if (special && t > 0 && pm.ground && !pm.hook) { stop = 1; break; }
+		if (!x->released && !pm.hook && latch >= 0) { x->released = 1; x->reljumps = pm.jumps; }	/* lost, or let go */
 		IGX_Input(x, o, t, &pm, route, latch, &in);
-		if (in.letgo) IG_PmoveHookRelease(&pm);
+		if (in.letgo) {
+			IG_PmoveHookRelease(&pm);
+			if (!x->released) { x->released = 1; x->reljumps = pm.jumps; }
+		}
 		if (in.fire) {
 			IG_PmoveHookFire(&pm, x->lastview[PITCH], x->lastview[YAW]);
 			wallpen += x->hookcost * (o->hookmul > 0 ? o->hookmul : 1);
@@ -311,6 +332,8 @@ static void IGX_Simulate(igx_t *x, igopt_t *o)
 		before = VectorLength(vh);
 		pm.blocked = 0;
 		for (half = 0; half < 2; half++) {
+			int pulled = pm.hook >= 2;
+
 			up = in.jump ? 400 : 0;
 			/* the game half of strafe chains (ig_botjumpland): a jump pressed
 			 * in the air is held two more frames */
@@ -320,6 +343,10 @@ static void IGX_Simulate(igx_t *x, igopt_t *o)
 				else if (airjump >= 0 && t - airjump <= 2) up = 400;
 			}
 			IG_Pmove(&pm, fm, sm, up, in.view[PITCH], in.view[YAW], 50);
+			/* Billy lets go before the pull drags him onto the floor (5 of 5
+			 * in his demo): every 50 ms pulled along the floor costs, as the
+			 * friction there takes the pull's speed */
+			if (pulled && pm.ground) wallpen += x->pullfloor;
 		}
 		VectorCopy(in.view, x->lastview);	/* the game fires along this next think */
 		if (pm.everhit & (CONTENTS_LAVA | CONTENTS_SLIME)) return;	/* out */
@@ -491,7 +518,7 @@ int IG_Plan(bot_state_t *bs, bot_goal_t *goal, bot_moveresult_t *mr)
 {
 	igx_t x;
 	igopt_t opts[PLAN_MAXOPT];
-	int n = 0, i, best = -1, pick, c = bs->client, ground, ours, k;
+	int n = 0, i, best = -1, pick, c = bs->client, ground, ours, k, groundhop;
 	float bestcost = 1e9f, total, r, w[PLAN_MAXOPT];
 	vec3_t eye, routedir, hookpos;
 	igpm_t pm;
@@ -515,7 +542,11 @@ int IG_Plan(bot_state_t *bs, bot_goal_t *goal, bot_moveresult_t *mr)
 	x.tfl = bs->tfl;
 	x.jumpland = trap_Cvar_VariableIntegerValue("ig_jumpland");
 	x.canfire = IG_CanFireHook(c);
-	x.flow = LibVarValue("ig_planflow", "0.2");	/* WIP */
+	x.flow = LibVarValue("ig_planflow", "0.2");
+	x.pullfloor = LibVarValue("ig_planpullfloor", "0.25");
+	/* a slingshot is flown with Billy's finish -- let go before the floor,
+	 * hop the landing -- so the anchors whose line has room to hop score best */
+	x.slinghop = LibVarValue("ig_planslinghop", "1") != 0;
 	x.hookcost = LibVarValue("ig_planhookcost", "0.5") * (1.6f - IG_PlanAffinity(bs)) / (1.6f - 0.55f);
 	VectorCopy(bs->viewangles, x.lastview);
 	if (x.lastview[PITCH] > 180) x.lastview[PITCH] -= 360;
@@ -537,13 +568,21 @@ int IG_Plan(bot_state_t *bs, bot_goal_t *goal, bot_moveresult_t *mr)
 	ours = igp_state[c].active || (x.hook && igp_state[c].hookout);
 	if (!x.hook) igp_state[c].hookout = 0;
 	if (ground && !x.hook) igp_state[c].active = 0;
-	if (ground) igp_state[c].landhop = 0;		/* landed: it jumped, or it is too late */
+	/* landed since the last think with a landing hop pending: hop now, at
+	 * most one 50 ms step late (a let-go just above the floor lands inside
+	 * the let-go's own think) -- then it is done */
+	groundhop = ground && igp_state[c].landhop && !x.hook;
+	if (ground) igp_state[c].landhop = 0;
 
 	/* what the planner does not plan: the stock movement's */
 	if (!ours && ((mr->traveltype & TRAVELTYPE_MASK) != TRAVEL_WALK ||
 				  (mr->flags & (MOVERESULT_MOVEMENTVIEWSET | MOVERESULT_WAITING | MOVERESULT_ONTOPOFOBSTACLE))))
 		return 0;
-	if (x.hook && !igp_state[c].hookout) return 0;		/* a climb route's hook: not ours */
+	if (x.hook && !igp_state[c].hookout) {		/* a climb route's hook: not ours */
+		if (trap_Cvar_VariableIntegerValue("ig_plandebug") == 2 && igp_state[c].landhop)
+			BotAI_Print(PRT_MESSAGE, "iglh %d stepped back: a hook not ours, sticky %d\n", c, igp_state[c].landhop);
+		return 0;
+	}
 	if (AAS_PointContents(bs->origin) & (CONTENTS_WATER | CONTENTS_LAVA | CONTENTS_SLIME)) return 0;
 
 	IGX_Start(&x, &pm);
@@ -566,16 +605,16 @@ int IG_Plan(bot_state_t *bs, bot_goal_t *goal, bot_moveresult_t *mr)
 	} else {
 		OPT(PO_RUN, 0, 0, -1, -1, 0, 0);
 		OPT(PO_HOP, 1, ground, -1, -1, 0, 0);
-		if (!ground) { OPT(PO_LANDHOP, 0, 0, -1, -1, 0, 0); opts[n - 1].landhop = 1; }	/* hop the next landing */
+		if (!ground || groundhop) { OPT(PO_LANDHOP, 0, 0, -1, -1, 0, 0); opts[n - 1].landhop = 1; }	/* hop the (next) landing */
 		/* flicked onto an anchor last think: it can go now */
 		if (igp_state[c].anchorset && FloatTime() - igp_state[c].flicktime < 0.15f &&
 			FloatTime() - igp_state[c].flicktime > 0.001f && x.canfire) {
-			{ OPT(PO_FIRE, 0, 0, -1, 0, 3, 0); opts[n - 1].hookmul = IGX_ClassMul(igp_state[c].anchorclass); }
+			{ OPT(PO_FIRE, 0, 0, -1, 0, 3, 0); opts[n - 1].hookmul = IGX_ClassMul(igp_state[c].anchorclass); opts[n - 1].landhop = x.slinghop; }
 		}
 		if (x.canfire) {
 			IGX_Anchors(&x, routedir);
 			for (i = 0; i < x.numanchors; i++)
-				{ OPT(PO_SLING, 0, ground, i, 1, 3, 0); opts[n - 1].hookmul = IGX_ClassMul(x.anchorclass[i]); }
+				{ OPT(PO_SLING, 0, ground, i, 1, 3, 0); opts[n - 1].hookmul = IGX_ClassMul(x.anchorclass[i]); opts[n - 1].landhop = x.slinghop; }
 		}
 	}
 #undef OPT
@@ -591,6 +630,10 @@ int IG_Plan(bot_state_t *bs, bot_goal_t *goal, bot_moveresult_t *mr)
 		/* a bot that snapped its view onto a spot hooks it: flicks that came
 		 * to nothing were half of them in v1, a view twitching at walls */
 		if (opts[i].kind == PO_FIRE) opts[i].cost -= PLAN_COMMIT;
+		/* a landing hop decided (every let-go decides one) is a promise too,
+		 * kept through the simulation: forced presses instead doubled the
+		 * wall hits and raised the lava trips */
+		else if (opts[i].kind == PO_LANDHOP && (igp_state[c].landhop || groundhop)) opts[i].cost -= PLAN_COMMIT;
 		else if (opts[i].kind == igp_state[c].kind ||
 				 (opts[i].kind == PO_HOLDHOP && igp_state[c].kind == PO_HOLD) || (opts[i].kind == PO_HOLD && igp_state[c].kind == PO_HOLDHOP))
 			opts[i].cost -= PLAN_KEEP;
@@ -642,10 +685,8 @@ int IG_Plan(bot_state_t *bs, bot_goal_t *goal, bot_moveresult_t *mr)
 		if (o->kind == PO_RUN) {
 			igp_state[c].kind = PO_RUN;
 			igp_state[c].anchorset = 0;
-			if (!ground && igp_state[c].active) {	/* our flight: steer it, and keep a landing hop decided */
-				int j = igp_state[c].landhop && bs->cur_ps.velocity[2] < 0;
-
-				EA_IGMove(c, in.wish, 400, j, 0);
+			if (!ground && igp_state[c].active) {	/* our flight: steer it */
+				EA_IGMove(c, in.wish, 400, 0, 0);
 				igp_state[c].steered = FloatTime();
 				igp_state[c].setmove = 1;
 				VectorCopy(in.wish, igp_state[c].wish);
@@ -662,11 +703,14 @@ int IG_Plan(bot_state_t *bs, bot_goal_t *goal, bot_moveresult_t *mr)
 		/* every let-go hops its landing, as Billy's all do, unless that
 		 * landing hop was ruled out (lava, a pit) */
 		if (in.letgo) {
+			int lok = -1;
+
 			for (i = 0; i < n; i++)
-				if (opts[i].kind == PO_LANDHOP && opts[i].ok) igp_state[c].landhop = 1;
+				if (opts[i].kind == PO_LANDHOP) { lok = opts[i].ok; if (opts[i].ok) igp_state[c].landhop = 1; }
+			if (trap_Cvar_VariableIntegerValue("ig_plandebug") == 2)
+				BotAI_Print(PRT_MESSAGE, "iglh %d letgo kind %s landhop-option %d sticky %d\n", c, po_names[o->kind], lok, igp_state[c].landhop);
 		}
 		if (o->kind == PO_SLING || o->kind == PO_FIRE) igp_state[c].landhop = 0;
-		if (igp_state[c].landhop && !ground && !x.hook && bs->cur_ps.velocity[2] < 0) in.jump = 1;
 		EA_IGMove(c, in.wish, 400, in.jump, 0);
 		igp_state[c].steered = FloatTime();
 		igp_state[c].setmove = 1;
@@ -985,9 +1029,34 @@ static void IGX_FightSim(igx_t *x, igfopt_t *o, const vec3_t enemyeye, float rea
  * (a slingshot's) is let go, nothing else would (the fight node does not run
  * the planner). The stock attack move took over 140 of 330 flights from a
  * let-go on q2rdm11, and none of them hopped the landing. */
+/* The flight on from now, steering along the velocity, jump held coming
+ * down when `hop`: lava, slime or a pit before it lands (and hops)? */
+static int IGX_FlightUnsafe(bot_state_t *bs, const vec3_t wish, int hop)
+{
+	igx_t x;
+	igpm_t pm;
+	float fm, sm;
+	int t, half;
+
+	Com_Memset(&x, 0, sizeof(x));
+	x.bs = bs;
+	IGX_Start(&x, &pm);
+	IGX_Moves(wish, bs->viewangles[YAW], &fm, &sm);
+	for (t = 0; t < 25; t++) {
+		int landed = pm.ground;
+
+		for (half = 0; half < 2; half++)
+			IG_Pmove(&pm, fm, sm, hop && pm.vel[2] < 0 ? 400 : 0, 0, bs->viewangles[YAW], 50);
+		if (pm.everhit & (CONTENTS_LAVA | CONTENTS_SLIME)) return 1;
+		if (pm.pad || pm.teleport) return 0;
+		if (landed && (!hop || pm.jumped)) break;		/* down, and hopped if it was to */
+	}
+	return IGX_EndUnsafe(&x, &pm);
+}
+
 static int IGX_FightFlight(bot_state_t *bs)
 {
-	int c = bs->client, hs;
+	int c = bs->client, hs, hop;
 	vec3_t eye, wish, hp;
 
 	if (!IG_PlanOn() || c < 0 || c >= MAX_CLIENTS) return 0;
@@ -995,6 +1064,12 @@ static int IGX_FightFlight(bot_state_t *bs)
 	eye[2] += bs->cur_ps.viewheight;
 	hs = IG_OwnHook(eye, VectorLength(bs->cur_ps.velocity), hp);
 	if (hs && igp_state[c].hookout) {
+		/* our slingshot's hook: let go when that is safe, else hold on (the
+		 * fight hook's own rule, IG_ARC_HOLD in ai_ig_sling.c) */
+		if (IG_PlanHookUnsafe(bs, 0) && !IG_PlanHookUnsafe(bs, 3)) {
+			IG_GrappleTravelNote(c);
+			return 0;
+		}
 		trap_EA_Command(c, LibVarGetString("cmd_grappleoff"));
 		igp_state[c].hookout = 0;
 		igp_state[c].landhop = 1;
@@ -1006,7 +1081,17 @@ static int IGX_FightFlight(bot_state_t *bs)
 	}
 	VectorSet(wish, bs->cur_ps.velocity[0], bs->cur_ps.velocity[1], 0);
 	if (VectorNormalize(wish) < 1) return 0;
-	EA_IGMove(c, wish, 400, igp_state[c].landhop && bs->cur_ps.velocity[2] < 0, 0);
+	/* flown first, as everything else: the hop if it is safe, else none, else
+	 * the stock attack move and the guard (unchecked, this raised q2rdm11's
+	 * lava trips from 0.195 to 0.29 a bot-minute) */
+	hop = igp_state[c].landhop;
+	if (hop && IGX_FlightUnsafe(bs, wish, 1)) hop = 0;
+	if (!hop && IGX_FlightUnsafe(bs, wish, 0)) {
+		igp_state[c].active = 0;
+		return 0;
+	}
+	igp_state[c].landhop = hop;
+	EA_IGMove(c, wish, 400, hop && bs->cur_ps.velocity[2] < 0, 0);
 	igp_state[c].steered = FloatTime();
 	return 1;
 }
