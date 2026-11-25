@@ -3711,6 +3711,47 @@ static int IG_Drill(bot_movestate_t *ms, bot_moveresult_t *result)
 	return 0;
 }
 
+/* IG-42 ig_padbounce (default 0): an airborne bot with no reachability to
+ * finish gives no input (stock), which is right for a fall it already planned.
+ * Dropped onto a pad that throws it straight up (q2rdm11, -880 973) it lands
+ * back on the pad every time and bounces forever, never on the ground long
+ * enough to pick a route. After 1 s in the air with under 50 u/s across,
+ * steer along the route from where it is, so the next launch carries it off. */
+static float ig_airsince[MAX_CLIENTS], ig_airlast[MAX_CLIENTS];
+static void IG_AirNoRoute(bot_movestate_t *ms, bot_goal_t *goal, int travelflags, bot_moveresult_t *result)
+{
+	int c = ms->client, area, reachnum;
+	aas_reachability_t reach;
+	vec3_t dir;
+	float now = AAS_Time();
+
+	if (c < 0 || c >= MAX_CLIENTS || !LibVarValue("ig_padbounce", "0")) return;
+	if (ig_airlast[c] < now - 0.3f || ig_airlast[c] > now) ig_airsince[c] = now;
+	ig_airlast[c] = now;
+	if (now - ig_airsince[c] < 1.0f || ms->velocity[0] * ms->velocity[0] + ms->velocity[1] * ms->velocity[1] > 50 * 50)
+		return;
+	area = AAS_PointAreaNum(ms->origin);
+	if (!area) area = ms->areanum;
+	reachnum = area ? BotGetReachabilityToGoal(ms->origin, area, ms->lastgoalareanum, ms->lastareanum,
+				ms->avoidreach, ms->avoidreachtimes, ms->avoidreachtries, goal, travelflags,
+				ms->avoidspots, ms->numavoidspots, NULL) : 0;
+	if (reachnum) {
+		AAS_ReachabilityFromNum(reachnum, &reach);
+		VectorSubtract(reach.start, ms->origin, dir);
+		dir[2] = 0;
+		if (VectorLength(dir) < 16) { VectorSubtract(reach.end, ms->origin, dir); dir[2] = 0; }
+	} else {
+		VectorSubtract(goal->origin, ms->origin, dir);
+		dir[2] = 0;
+	}
+	if (VectorNormalize(dir) < 0.1f) return;
+	EA_Move(c, dir, 400);
+	VectorCopy(dir, result->movedir);
+	if (now - ig_airsince[c] < 1.06f)
+		botimport.Print(PRT_MESSAGE, "ig: padbounce %d area %d reach %d at %.0f %.0f %.0f\n", c, area, reachnum,
+				ms->origin[0], ms->origin[1], ms->origin[2]);
+}
+
 void BotMoveToGoal(bot_moveresult_t *result, int movestate, bot_goal_t *goal, int travelflags)
 {
 	int reachnum, lastreachnum, foundjumppad, ent, resultflags, ontrain = false;
@@ -4198,6 +4239,7 @@ void BotMoveToGoal(bot_moveresult_t *result, int movestate, bot_goal_t *goal, in
 			} //end if
 #endif //DEBUG
 		} //end if
+		else IG_AirNoRoute(ms, goal, travelflags, result); /* IG: IG-42 */
 	} //end else
 	//FIXME: is it right to do this here?
 	if (result->blocked) ms->reachability_time -= 10 * ms->thinktime;
