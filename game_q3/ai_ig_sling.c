@@ -1777,14 +1777,17 @@ void IG_Slingshot(bot_state_t *bs, bot_goal_t *goal, bot_moveresult_t *moveresul
 	/* IG-40: the planner moves the bot; the trick-by-trick code stands down.
 	 * Kept for now: the jump-pad hooks, the lava escape, a fight hook's end. */
 	if (IG_PlanOn()) {
-		if (IG_PadHook(bs)) return;
+		if (!IG_PlanPadSlingOn() && IG_PadHook(bs)) return;	/* the old end-of-arc hook, unless the pad top's */
 		if (IG_LavaEscape(bs)) return;
 		if (c >= 0 && c < MAX_CLIENTS && ig_fight[c].state != IG_FIGHT_NONE) {
 			if (ig_fight[c].state == IG_FIGHT_HOOKED) IG_HookMove(bs, 0);
 			else ig_fight[c].state = IG_FIGHT_NONE;
 			return;
 		}
-		if (c >= 0 && c < MAX_CLIENTS && IG_InPadFlight(bs)) return;
+		if (c >= 0 && c < MAX_CLIENTS && IG_InPadFlight(bs)) {
+			IG_PlanPadTop(bs, goal, moveresult);	/* IG-40: Billy's pad trick, a slingshot at the top */
+			return;
+		}
 		if (IG_PadApproach(bs, goal, moveresult)) return;
 		IG_Plan(bs, goal, moveresult);
 		return;

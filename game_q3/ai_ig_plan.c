@@ -105,6 +105,7 @@ static struct {
 	int		hookout;		/* we fired the hook that is out */
 	int		anchorclass;	/* the flicked anchor's class */
 	int		landhop;		/* a landing hop decided: jump held coming down until it lands */
+	int		padfired;		/* IG-40 pad top: this pad flight has had its slingshot */
 	int		fightside;		/* the strafe side in a fight's air time, swapped every think */
 	float	anchornz;
 	vec3_t	firedir;		/* ...along this: the flight a flying hook keeps */
@@ -520,8 +521,8 @@ static void IGX_Simulate(igx_t *x, igopt_t *o)
  *              units: the stairwell and ledge hook (T6); x ig_planupmul (1)
  *   IGA_SIDE   40 degrees off the route: a turn around a corner, worth it only
  *              when it clearly pays; x ig_plansidemul (2) */
-enum { IGA_SLING, IGA_UP, IGA_SIDE };
-static const char *iga_names[] = { "sling", "up", "side" };
+enum { IGA_SLING, IGA_UP, IGA_SIDE, IGA_PADTOP };
+static const char *iga_names[] = { "sling", "up", "side", "padtop" };
 
 static void IGX_AnchorTry(igx_t *x, float pitch, float yaw, float mind, int cls)
 {
@@ -574,8 +575,30 @@ static void IGX_Anchors(igx_t *x, const vec3_t routedir)
 	}
 }
 
+/* Billy's pad trick (recorded 2026-11-25, q2rdm11: "a jump pad into a grapple
+ * and strafe jumping to get across the map fast"): the vertical pad throws him
+ * straight up (718 up, 91 across); rising, he turns 150 degrees to face along
+ * the upper walkway; just past the top (falling at 214) he hooks LEVEL and far
+ * along it (4 degrees up, a wall ~480 units out), the pull takes him to 938
+ * u/s in 0.27 s, he lets go still rising and hops the walkway at 706 u/s, no
+ * frame on the ground. The old end-of-arc hook pulled down onto the floor just
+ * past the landing and gained nothing. Anchors from the top of a pad flight:
+ * along the route past the landing, level to 10 up, 300+ units, walls too. */
+static void IGX_PadAnchors(igx_t *x, const vec3_t routedir)
+{
+	static const float yaws[3] = {-16, 0, 16}, pitches[5] = {6, 2, -3, -8, -12};
+	float baseyaw = atan2(routedir[1], routedir[0]) * 180 / M_PI;
+	int i, j;
+
+	x->numanchors = 0;
+	for (i = 0; i < 3; i++)
+		for (j = 0; j < 5; j++)
+			IGX_AnchorTry(x, pitches[j], baseyaw + yaws[i], 300, IGA_PADTOP);
+}
+
 static float IGX_ClassMul(int cls)
 {
+	if (cls == IGA_PADTOP) return LibVarValue("ig_planpadmul", "0.3");
 	return cls == IGA_SLING ? LibVarValue("ig_planslingmul", "0.3") :
 		   cls == IGA_UP ? LibVarValue("ig_planupmul", "1") : LibVarValue("ig_plansidemul", "2");
 }
@@ -602,6 +625,9 @@ static void IGX_Flick(bot_state_t *bs, const vec3_t view)
 		bs->viewanglespeed[i] = 0;
 	}
 }
+
+static int		igp_padmode;	/* IG_Plan called by IG_PlanPadTop: a pad flight */
+static vec3_t	igp_padland;
 
 static float IGX_HSpeed(bot_state_t *bs)
 {
@@ -683,9 +709,10 @@ int IG_Plan(bot_state_t *bs, bot_goal_t *goal, bot_moveresult_t *mr)
 	 * the let-go's own think) -- then it is done */
 	groundhop = ground && igp_state[c].landhop && !x.hook;
 	if (ground) igp_state[c].landhop = 0;
+	if (ground) igp_state[c].padfired = 0;
 
 	/* what the planner does not plan: the stock movement's */
-	if (!ours && ((mr->traveltype & TRAVELTYPE_MASK) != TRAVEL_WALK ||
+	if (!igp_padmode && !ours && ((mr->traveltype & TRAVELTYPE_MASK) != TRAVEL_WALK ||
 				  (mr->flags & (MOVERESULT_MOVEMENTVIEWSET | MOVERESULT_WAITING | MOVERESULT_ONTOPOFOBSTACLE))))
 		return 0;
 	if (x.hook && !igp_state[c].hookout) {		/* a climb route's hook: not ours */
@@ -696,7 +723,23 @@ int IG_Plan(bot_state_t *bs, bot_goal_t *goal, bot_moveresult_t *mr)
 	if (AAS_PointContents(bs->origin) & (CONTENTS_WATER | CONTENTS_LAVA | CONTENTS_SLIME)) return 0;
 
 	IGX_Start(&x, &pm);
-	if (!IGX_RouteDir(&x, pm.org, pm.area, routedir)) {
+	if (igp_padmode) {		/* a pad flight: the route from where the pad lands it */
+		vec3_t up;
+		int la;
+
+		VectorCopy(igp_padland, up);
+		up[2] += 16;
+		la = AAS_PointAreaNum(up);
+		if (!la || !IGX_RouteDir(&x, up, la, routedir)) {
+			/* the landing's own area has no step (often the goal's): toward the goal */
+			VectorSubtract(goal->origin, igp_padland, routedir);
+			routedir[2] = 0;
+			if (VectorNormalize(routedir) < 64) {
+				if (trap_Cvar_VariableIntegerValue("ig_plandebug") == 3) BotAI_Print(PRT_MESSAGE, "igpad %d noroute area %d\n", c, la);
+				return 0;
+			}
+		}
+	} else if (!IGX_RouteDir(&x, pm.org, pm.area, routedir)) {
 		if (!ours) return 0;
 		VectorSet(routedir, bs->cur_ps.velocity[0], bs->cur_ps.velocity[1], 0);
 		if (VectorNormalize(routedir) < 1) return 0;
@@ -718,17 +761,24 @@ int IG_Plan(bot_state_t *bs, bot_goal_t *goal, bot_moveresult_t *mr)
 		 * ground accelerates faster than the air), yet scored near the run and was
 		 * picked now and then -- after a respawn, say. On the ground, hops only
 		 * when already moving (ig_planhopmin u/s across, default 250). */
-		int hopok = !ground || IGX_HSpeed(bs) >= LibVarValue("ig_planhopmin", "250");
+		int hopok = !igp_padmode && (!ground || IGX_HSpeed(bs) >= LibVarValue("ig_planhopmin", "250"));
 
 		OPT(PO_RUN, 0, 0, -1, -1, 0, 0);
 		if (hopok) OPT(PO_HOP, 1, ground, -1, -1, 0, 0);
-		if ((!ground || groundhop) && hopok) { OPT(PO_LANDHOP, 0, 0, -1, -1, 0, 0); opts[n - 1].landhop = 1; }	/* hop the (next) landing */
+		if ((!ground || groundhop) && (hopok || (igp_padmode && igp_state[c].padfired))) { OPT(PO_LANDHOP, 0, 0, -1, -1, 0, 0); opts[n - 1].landhop = 1; }	/* hop the (next) landing; after a pad-top slingshot too */
 		/* flicked onto an anchor last think: it can go now */
 		if (igp_state[c].anchorset && FloatTime() - igp_state[c].flicktime < 0.15f &&
 			FloatTime() - igp_state[c].flicktime > 0.001f && x.canfire) {
 			{ OPT(PO_FIRE, 0, 0, -1, 0, 3, 0); opts[n - 1].hookmul = IGX_ClassMul(igp_state[c].anchorclass); opts[n - 1].landhop = x.slinghop; }
 		}
-		if (x.canfire) {
+		if (igp_padmode) {
+			/* the top of the arc, once a flight (Billy fired falling at 214) */
+			if (x.canfire && !igp_state[c].padfired && bs->cur_ps.velocity[2] < LibVarValue("ig_planpadtopvz", "150")) {
+				IGX_PadAnchors(&x, routedir);
+				for (i = 0; i < x.numanchors; i++)
+					{ OPT(PO_SLING, 0, 0, i, 1, 3, 0); opts[n - 1].hookmul = IGX_ClassMul(x.anchorclass[i]); opts[n - 1].landhop = x.slinghop; }
+			}
+		} else if (x.canfire) {
 			IGX_Anchors(&x, routedir);
 			for (i = 0; i < x.numanchors; i++)
 				{ OPT(PO_SLING, 0, ground, i, 1, 3, 0); opts[n - 1].hookmul = IGX_ClassMul(x.anchorclass[i]); opts[n - 1].landhop = x.slinghop; }
@@ -771,6 +821,17 @@ int IG_Plan(bot_state_t *bs, bot_goal_t *goal, bot_moveresult_t *mr)
 			if (opts[i].kind == PO_FIRE) { nf++; fok = opts[i].ok; fc = opts[i].cost; }
 		BotAI_Print(PRT_MESSAGE, "igpafter %d fireopt %d ok %d cost %.2f best %.2f canfire %d hook %d dt %.3f ground %d\n", c, nf, fok, fc,
 					bestcost, x.canfire, x.hook, FloatTime() - igp_state[c].flicktime, ground);
+	}
+	if (igp_padmode && trap_Cvar_VariableIntegerValue("ig_plandebug") == 3) {
+		int ns = 0, nok = 0;
+		float runc = -1, bests = 1e9f;
+
+		for (i = 0; i < n; i++) {
+			if (opts[i].kind == PO_RUN && opts[i].ok) runc = opts[i].cost;
+			if (opts[i].kind == PO_SLING) { ns++; if (opts[i].ok) { nok++; if (opts[i].cost < bests) bests = opts[i].cost; } }
+		}
+		BotAI_Print(PRT_MESSAGE, "igpad %d vz %.0f anchors %d slings %d ok %d run %.2f bestsling %.2f pick %s fired %d canfire %d\n", c,
+					bs->cur_ps.velocity[2], x.numanchors, ns, nok, runc, bests, best >= 0 ? po_names[opts[best].kind] : "-", igp_state[c].padfired, x.canfire);
 	}
 	if (best < 0) {
 		/* every option ends in lava or a pit: let go if hooked, else the stock move */
@@ -855,6 +916,7 @@ int IG_Plan(bot_state_t *bs, bot_goal_t *goal, bot_moveresult_t *mr)
 			IG_NoteHookFire(c);
 			IG_GrappleTravelNote(c);
 			igp_state[c].hookout = 1;
+			if (igp_padmode) igp_state[c].padfired = 1;
 			igp_state[c].anchorset = 0;
 			AngleVectors(x.lastview, igp_state[c].firedir, NULL, NULL);
 			VectorSubtract(igp_state[c].anchor, eye, d);
@@ -1430,4 +1492,25 @@ int IG_PlanFight(bot_state_t *bs)
 	if (trap_Cvar_VariableIntegerValue("ig_plandebug") == 2)
 		BotAI_Print(PRT_MESSAGE, "igfight %d opt %d hop %d cost %.2f best %.2f ready %.2f\n", c, pick, opts[pick].hop, opts[pick].cost, best, ready);
 	return 1;
+}
+
+/* IG-40 pad top (libvar ig_planpadsling, default 0): in a jump pad's flight,
+ * the planner may slingshot from the top of the arc along the route past the
+ * landing (IGX_PadAnchors); riding the pad on is its "run". Returns as IG_Plan:
+ * 0 leaves the flight to the stock pad steering. */
+int IG_PlanPadTop(bot_state_t *bs, bot_goal_t *goal, bot_moveresult_t *mr)
+{
+	int r;
+
+	if (!IG_PlanOn() || !LibVarValue("ig_planpadsling", "0") || bs->client < 0 || bs->client >= MAX_CLIENTS) return 0;
+	if (!IG_PadFlight(bs->client, igp_padland)) return 0;
+	igp_padmode = 1;
+	r = IG_Plan(bs, goal, mr);
+	igp_padmode = 0;
+	return r;
+}
+
+int IG_PlanPadSlingOn(void)
+{
+	return IG_PlanOn() && LibVarValue("ig_planpadsling", "0") != 0;
 }
