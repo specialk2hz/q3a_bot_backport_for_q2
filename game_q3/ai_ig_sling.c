@@ -1790,9 +1790,13 @@ void IG_Slingshot(bot_state_t *bs, bot_goal_t *goal, bot_moveresult_t *moveresul
 			else ig_fight[c].state = IG_FIGHT_NONE;
 			return;
 		}
-		if (c >= 0 && c < MAX_CLIENTS && IG_InPadFlight(bs)) {
-			IG_PlanPadTop(bs, goal, moveresult);	/* IG-40: Billy's pad trick, a slingshot at the top */
-			return;
+		{
+			int padover = IG_PlanPadOver(bs);	/* every think: it watches for the landing */
+
+			if (c >= 0 && c < MAX_CLIENTS && IG_InPadFlight(bs) && !padover) {
+				IG_PlanPadTop(bs, goal, moveresult);	/* IG-40: Billy's pad trick, a slingshot at the top */
+				return;
+			}
 		}
 		if (IG_PadApproach(bs, goal, moveresult)) return;
 		{ vec3_t dp; if (IG_PadDrillPad(c, dp)) return; }	/* IG-43's pad drill: on its way to the pad */

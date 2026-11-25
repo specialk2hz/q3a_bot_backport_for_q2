@@ -50,6 +50,7 @@ int  IG_PmoveTraces(void);
 int  IG_PlanOn(void);
 int  IG_PlanPadTop(bot_state_t *bs, bot_goal_t *goal, bot_moveresult_t *mr);
 int  IG_PlanPadSlingOn(void);
+int  IG_PlanPadOver(bot_state_t *bs);
 int  IG_Plan(bot_state_t *bs, bot_goal_t *goal, bot_moveresult_t *mr);
 float IG_PlanAffinity(bot_state_t *bs);		/* ai_ig_sling.c */
 void IG_PlanNode(int c, const char *node);

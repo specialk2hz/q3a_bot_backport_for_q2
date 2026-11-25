@@ -320,6 +320,15 @@ typedef struct {
 
 /* The input of option `o` at think t, for a body in state pm (sim or real).
  * routedir: the route's way from here. latch: think the hook bit (-1). */
+/* A landing hop on a flight with no hook in it (a strafe jump's, a pad's): it
+ * pressed jump only after a hook's let-go, so on a plain flight "hop the
+ * landing" was "run" -- scored the same, and the bot landed flat: 808 -> 396
+ * u/s on Billy's walkway (ig_planplainlandhop 0: the old way). */
+static int IGX_PlainLandHop(const igx_t *x, const igopt_t *o)
+{
+	return o->kind == PO_LANDHOP && !x->hook && LibVarValue("ig_planplainlandhop", "1") != 0;
+}
+
 static void IGX_Input(igx_t *x, const igopt_t *o, int t, const igpm_t *pm, const vec3_t routedir,
 					  int latch, igin_t *in)
 {
@@ -344,7 +353,7 @@ static void IGX_Input(igx_t *x, const igopt_t *o, int t, const igpm_t *pm, const
 
 	if (pm->ground) {
 		VectorCopy(routedir, in->wish);
-		in->jump = (t == 0 && o->jump0) || o->hop || (o->landhop && (x->released || in->letgo) && pm->jumps == x->reljumps && (in->letgo || pm->hook < 2));
+		in->jump = (t == 0 && o->jump0) || o->hop || (o->landhop && (x->released || in->letgo || IGX_PlainLandHop(x, o)) && pm->jumps == x->reljumps && (in->letgo || pm->hook < 2));
 	} else {
 		if (pm->hook >= 2) VectorCopy(routedir, in->wish);
 		else IGX_AirWish(pm->vel, routedir, in->wish, x->strafeskill);
@@ -352,7 +361,7 @@ static void IGX_Input(igx_t *x, const igopt_t *o, int t, const igpm_t *pm, const
 		 * Billy's slingshot (demo, 2026-11-25) lets go in the air and has jump
 		 * down before he lands -- off the floor again within 8 ms, 860-940 u/s
 		 * kept; a landing without it gives friction the first step */
-		in->jump = (o->hop || (o->landhop && (x->released || in->letgo) && pm->jumps == x->reljumps)) && pm->vel[2] < 0 && (pm->hook < 2 || in->letgo);
+		in->jump = (o->hop || (o->landhop && (x->released || in->letgo || IGX_PlainLandHop(x, o)) && pm->jumps == x->reljumps)) && pm->vel[2] < 0 && (pm->hook < 2 || in->letgo);
 	}
 }
 
@@ -692,6 +701,16 @@ int IG_Plan(bot_state_t *bs, bot_goal_t *goal, bot_moveresult_t *mr)
 	 * hop the landing -- so the anchors whose line has room to hop score best */
 	x.slinghop = LibVarValue("ig_planslinghop", "1") != 0;
 	x.hookcost = LibVarValue("ig_planhookcost", "0.5") * (1.6f - IG_PlanAffinity(bs)) / (1.6f - 0.55f);
+	/* Billy, watching his q2rdm11 pad route drilled: "I was hoping to have just
+	 * the one grapple and strafe jumping used to keep momentum". Carrying speed,
+	 * a hook must gain a lot to beat hopping on: above 450 u/s across its price
+	 * grows, x2.7 at 700, x4 at 900 (ig_planfasthook 0: off). Not in a pad's
+	 * flight, which starts slow. */
+	if (!igp_padmode && LibVarValue("ig_planfasthook", "1")) {
+		float hs = IGX_HSpeed(bs);
+
+		if (hs > 450) x.hookcost *= 1 + (hs - 450) / LibVarValue("ig_planfasthookdiv", "150");
+	}
 	VectorCopy(bs->viewangles, x.lastview);
 	if (x.lastview[PITCH] > 180) x.lastview[PITCH] -= 360;
 	if (igp_state[c].flicktime > 0 && FloatTime() - igp_state[c].flicktime < 0.15f && FloatTime() - igp_state[c].flicktime > 0.001f)
@@ -721,8 +740,11 @@ int IG_Plan(bot_state_t *bs, bot_goal_t *goal, bot_moveresult_t *mr)
 
 	/* what the planner does not plan: the stock movement's */
 	if (!igp_padmode && !ours && ((mr->traveltype & TRAVELTYPE_MASK) != TRAVEL_WALK ||
-				  (mr->flags & (MOVERESULT_MOVEMENTVIEWSET | MOVERESULT_WAITING | MOVERESULT_ONTOPOFOBSTACLE))))
+				  (mr->flags & (MOVERESULT_MOVEMENTVIEWSET | MOVERESULT_WAITING | MOVERESULT_ONTOPOFOBSTACLE)))) {
+		if (trap_Cvar_VariableIntegerValue("ig_plandebug") == 2)
+			BotAI_Print(PRT_MESSAGE, "igret %d stock travel %d flags %d ground %d speed %.0f\n", c, mr->traveltype & TRAVELTYPE_MASK, mr->flags, ground, IGX_HSpeed(bs));
 		return 0;
+	}
 	if (x.hook && !igp_state[c].hookout) {		/* a climb route's hook: not ours */
 		if (trap_Cvar_VariableIntegerValue("ig_plandebug") == 2 && igp_state[c].landhop)
 			BotAI_Print(PRT_MESSAGE, "iglh %d stepped back: a hook not ours, sticky %d\n", c, igp_state[c].landhop);
@@ -815,6 +837,10 @@ int IG_Plan(bot_state_t *bs, bot_goal_t *goal, bot_moveresult_t *mr)
 		 * kept through the simulation: forced presses instead doubled the
 		 * wall hits and raised the lava trips */
 		else if (opts[i].kind == PO_LANDHOP && (igp_state[c].landhop || groundhop)) opts[i].cost -= PLAN_COMMIT;
+		/* in the air with speed, the landing is hopped as a habit (Billy hops
+		 * every one; the planner's "run" handed the flight to the stock move,
+		 * which never hops: 808 -> 302 u/s on the walkway). ig_planlandhopbonus */
+		else if (opts[i].kind == PO_LANDHOP && !ground && IGX_HSpeed(bs) >= 400) opts[i].cost -= LibVarValue("ig_planlandhopbonus", "0.25");
 		else if (opts[i].kind == igp_state[c].kind ||
 				 (opts[i].kind == PO_HOLDHOP && igp_state[c].kind == PO_HOLD) || (opts[i].kind == PO_HOLD && igp_state[c].kind == PO_HOLDHOP))
 			opts[i].cost -= PLAN_KEEP;
@@ -1519,6 +1545,28 @@ int IG_PlanPadTop(bot_state_t *bs, bot_goal_t *goal, bot_moveresult_t *mr)
 	r = IG_Plan(bs, goal, mr);
 	igp_padmode = 0;
 	return r;
+}
+
+/* A pad's flight ends at its first landing. The stock pad travel keeps
+ * "finishing" the pad route until a think finds the bot on the ground, and a
+ * landing hopped at once never gives it one: each later hop was flown as the
+ * pad's (pad mode: ride it out, the stock air steering, no landing hop) and
+ * the chain died on Billy's walkway (808 -> 396 u/s). Rising again from below
+ * (a jump, not the pad's throw) with no hook out: the pad is done. */
+static float igp_lastvz[MAX_CLIENTS];
+static int igp_padover[MAX_CLIENTS];
+
+int IG_PlanPadOver(bot_state_t *bs)
+{
+	int c = bs->client;
+	float vz = bs->cur_ps.velocity[2];
+
+	if (c < 0 || c >= MAX_CLIENTS) return 0;
+	if (vz > 500 && igp_lastvz[c] < 350) igp_padover[c] = 0;		/* a pad's throw */
+	else if (vz > 0 && igp_lastvz[c] <= 0 && !igp_state[c].hookout && LibVarValue("ig_planpadover", "1")) igp_padover[c] = 1;
+	if (bs->cur_ps.groundEntityNum != ENTITYNUM_NONE && vz < 100) igp_padover[c] = 1;	/* on the launch think the state still stands on the pad */
+	igp_lastvz[c] = vz;
+	return igp_padover[c];
 }
 
 int IG_PlanPadSlingOn(void)
