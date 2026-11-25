@@ -409,7 +409,8 @@ void EA_IGMove(int client, vec3_t dir, float speed, int jump, int crouch)
 	bi->speed = speed;
 	bi->actionflags &= ~(ACTION_JUMP | ACTION_DELAYEDJUMP | ACTION_CROUCH | ACTION_MOVEFORWARD |
 						 ACTION_MOVEBACK | ACTION_MOVELEFT | ACTION_MOVERIGHT);
-	if (jump) bi->actionflags |= ACTION_JUMP;
+	if (jump == 2) bi->actionflags |= ACTION_DELAYEDJUMP;	/* released the first half-think, pressed the second */
+	else if (jump) bi->actionflags |= ACTION_JUMP;
 	if (crouch) bi->actionflags |= ACTION_CROUCH;
 }
 

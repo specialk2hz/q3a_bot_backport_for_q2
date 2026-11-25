@@ -453,7 +453,7 @@ static void IGX_Simulate(igx_t *x, igopt_t *o)
 		if (pm.everhit & (CONTENTS_LAVA | CONTENTS_SLIME)) return;	/* out */
 		VectorSet(vh, pm.vel[0], pm.vel[1], 0);
 		after = VectorLength(vh);
-		if (pm.blocked && before - after > 200) wallpen += 0.15f * (before - after) / 300;
+		if (pm.blocked && before - after > 200) wallpen += 0.15f * (before - after) / 300 * LibVarValue("ig_planwallmul", "1");
 		flow += after;
 		flown++;
 		if (pm.pad || pm.teleport) break;	/* the navigation file knows where those go */
@@ -488,7 +488,7 @@ static void IGX_Simulate(igx_t *x, igopt_t *o)
 			if (pm.everhit & (CONTENTS_LAVA | CONTENTS_SLIME)) return;
 			VectorSet(vh, pm.vel[0], pm.vel[1], 0);
 			after = VectorLength(vh);
-			if (pm.blocked && before - after > 200) wallpen += 0.15f * (before - after) / 300;
+			if (pm.blocked && before - after > 200) wallpen += 0.15f * (before - after) / 300 * LibVarValue("ig_planwallmul", "1");
 			if (pm.pad || pm.teleport) break;
 		}
 	}
@@ -890,6 +890,23 @@ int IG_Plan(bot_state_t *bs, bot_goal_t *goal, bot_moveresult_t *mr)
 		if (r < w[i]) { pick = i; break; }
 		r -= w[i];
 	}
+	/* In the air with speed, the landing is hopped as a habit -- unless that is
+	 * clearly worse (lava, a pit, a wall: ruled out or priced by the
+	 * simulation). Roaming, 4 maps: 48% of fast landings were hopped (Billy
+	 * nearly all); 500 of the flat ones were "run" (or "let go") picked
+	 * by chance over a near-equal "hop the landing". ig_planairhop */
+	/* ... and on the think after a landing with the hop still pending: Quake II
+	 * checks the jump at the start of each step, so a press that came in the
+	 * step that landed did not count, and "run" here went flat (262 of 4 maps'
+	 * flat landings had jump down). */
+	if ((!ground || groundhop) && IGX_HSpeed(bs) >= LibVarValue("ig_planairhopspeed", "300") && (opts[pick].kind == PO_RUN || opts[pick].kind == PO_LETGO) &&
+		LibVarValue("ig_planairhop", "1")) {
+		int want_letgo = opts[pick].kind == PO_LETGO;
+
+		for (i = 0; i < n; i++)
+			if (opts[i].kind == PO_LANDHOP && opts[i].ok && (opts[i].letgo != 0) == want_letgo &&
+				opts[i].cost <= opts[pick].cost + LibVarValue("ig_planairhopmargin", "0.5")) { pick = i; break; }
+	}
 
 	/* do its first think */
 	{
@@ -929,6 +946,19 @@ int IG_Plan(bot_state_t *bs, bot_goal_t *goal, bot_moveresult_t *mr)
 				BotAI_Print(PRT_MESSAGE, "iglh %d letgo kind %s landhop-option %d sticky %d\n", c, po_names[o->kind], lok, igp_state[c].landhop);
 		}
 		if (o->kind == PO_SLING || o->kind == PO_FIRE) igp_state[c].landhop = 0;
+		/* still rising, but down within this think (a step, stairs, a ledge):
+		 * the jump goes down for its second half (a delayed jump), or the
+		 * landing comes before the next think and goes flat. ig_planlatejump */
+		if (!in.jump && o->landhop && !ground && pm.vel[2] >= 0 && LibVarValue("ig_planlatejump", "1")) {
+			igpm_t p2 = pm;
+			float fm, sm;
+			int h;
+
+			IGX_Moves(in.wish, x.lastview[YAW], &fm, &sm);
+			for (h = 0; h < 2 && !p2.ground; h++)
+				IG_Pmove(&p2, fm, sm, 0, x.lastview[PITCH], x.lastview[YAW], 50);
+			if (p2.ground) in.jump = 2;
+		}
 		EA_IGMove(c, in.wish, 400, in.jump, 0);
 		igp_state[c].steered = FloatTime();
 		igp_state[c].setmove = 1;
