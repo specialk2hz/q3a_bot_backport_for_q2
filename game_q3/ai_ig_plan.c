@@ -72,6 +72,7 @@ typedef struct {
 	int		fire;		/* think to fire at; -1 none */
 	int		relafter;	/* let go this many thinks after the hook bites; 0 keep it */
 	int		letgo;		/* let go on the first think */
+	int		wallhit;	/* its simulation runs into a wall (200+ u/s lost) */
 	int		landhop;	/* jump pressed coming down, so the landing jumps at once -- once, then run */
 	float	hookmul;	/* the hook price times this: by the anchor's class */
 	float	cost;
@@ -97,6 +98,8 @@ typedef struct {
 	int			released, reljumps;			/* in a simulation: the hook let go, and the jumps made by then */
 	int			slinghop;					/* slingshots are flown with Billy's finish (ig_planslinghop) */
 	vec3_t		hookpos, hookdir;
+	int			haslook;					/* IGX_LookAhead found a point to curve toward */
+	vec3_t		look, lookfrom;
 } igx_t;
 
 static struct {
@@ -172,6 +175,18 @@ static int IGX_RouteDirS(igx_t *x, const vec3_t org, int area, vec3_t dir, int *
 	if (special) *special = 0;
 	if (!area) return 0;
 	VectorCopy(org, o);
+	/* the look-ahead point (IGX_LookAhead), until it is reached or passed */
+	if (x->haslook) {
+		vec3_t a, b;
+
+		VectorSubtract(x->look, o, a);
+		VectorSubtract(x->look, x->lookfrom, b);
+		a[2] = b[2] = 0;
+		if (DotProduct(a, b) > 0 && VectorLength(a) > 64) {
+			VectorCopy(a, dir);
+			return VectorNormalize(dir) > 1;
+		}
+	}
 	if (area == x->goalarea) {
 		VectorCopy(x->goalorg, t);
 	} else {
@@ -192,6 +207,74 @@ static int IGX_RouteDirS(igx_t *x, const vec3_t org, int area, vec3_t dir, int *
 static int IGX_RouteDir(igx_t *x, const vec3_t org, int area, vec3_t dir)
 {
 	return IGX_RouteDirS(x, org, area, dir, NULL);
+}
+
+/* Curving through turns (Billy, watching roaming bots: "hitting the end of the
+ * walls before changing directions instead of curving"). The route's way was
+ * the next step's start -- a corner -- until within 40 units of it. Once a
+ * think: walk the route on up to ig_planlookdist (500) units through plain
+ * walking steps, and take the farthest point reached in a straight line: the
+ * body clears (a trace raised a step's height) and there is floor under the
+ * line, no lava or slime. The decision and the simulation steer at it until it
+ * is reached or passed (IGX_RouteDirS). ig_planlook 0: the old way. */
+static int IGX_LineClear(bot_state_t *bs, const vec3_t a, const vec3_t b)
+{
+	vec3_t mins = {-16, -16, -6}, maxs = {16, 16, 32}, p, q, d;
+	bsp_trace_t tr;
+	float len, f;
+
+	if (fabs(b[2] - a[2]) > 64) return 0;
+	BotAI_Trace(&tr, (float *) a, mins, maxs, (float *) b, bs->entitynum, CONTENTS_SOLID | CONTENTS_PLAYERCLIP);
+	if (tr.startsolid || tr.fraction < 1) return 0;
+	VectorSubtract(b, a, d);
+	len = VectorLength(d);
+	for (f = 48; f < len; f += 48) {
+		VectorMA(a, f / len, d, p);
+		VectorCopy(p, q);
+		q[2] -= 24 + 64;
+		BotAI_Trace(&tr, p, NULL, NULL, q, bs->entitynum, CONTENTS_SOLID | CONTENTS_PLAYERCLIP | CONTENTS_LAVA | CONTENTS_SLIME);
+		if (tr.fraction >= 1 || (tr.contents & (CONTENTS_LAVA | CONTENTS_SLIME))) return 0;
+	}
+	return 1;
+}
+
+static void IGX_LookAhead(igx_t *x, const vec3_t org, int area)
+{
+	vec3_t pts[16], o, a, b;
+	int n = 0, k, tt, rn, ar = area, tv;
+	aas_reachability_t r;
+	float dist = 0, maxd = LibVarValue("ig_planlookdist", "500");
+
+	x->haslook = 0;
+	if (!LibVarValue("ig_planlook", "1") || !ar) return;
+	VectorCopy(org, o);
+	for (k = 0; k < 8 && n < 15 && dist < maxd; k++) {
+		if (ar == x->goalarea) { VectorCopy(x->goalorg, pts[n++]); break; }
+		if (!AAS_AreaRouteToGoalArea(ar, o, x->goalarea, x->tfl, &tt, &rn) || !rn) break;
+		AAS_ReachabilityFromNum(rn, &r);
+		tv = r.traveltype & TRAVELTYPE_MASK;
+		if (tv != TRAVEL_WALK) break;
+		VectorCopy(r.start, pts[n++]);
+		VectorCopy(r.end, pts[n++]);
+		VectorSubtract(r.end, o, a);
+		dist += VectorLength(a);
+		VectorCopy(r.end, o);
+		ar = r.areanum;
+	}
+	VectorCopy(org, a);
+	a[2] += 18;
+	for (k = n - 1; k >= 1; k--) {		/* the farthest in a straight line (one step ahead needs no look-ahead) */
+		VectorSubtract(pts[k], org, b);
+		b[2] = 0;
+		if (VectorLength(b) > maxd + 64 || VectorLength(b) < 96) continue;
+		VectorCopy(pts[k], b);
+		b[2] += 18;
+		if (!IGX_LineClear(x->bs, a, b)) continue;
+		VectorCopy(pts[k], x->look);
+		VectorCopy(org, x->lookfrom);
+		x->haslook = 1;
+		return;
+	}
 }
 
 /* In the air: the wish that keeps the most speed while turning toward the
@@ -453,7 +536,7 @@ static void IGX_Simulate(igx_t *x, igopt_t *o)
 		if (pm.everhit & (CONTENTS_LAVA | CONTENTS_SLIME)) return;	/* out */
 		VectorSet(vh, pm.vel[0], pm.vel[1], 0);
 		after = VectorLength(vh);
-		if (pm.blocked && before - after > 200) wallpen += 0.15f * (before - after) / 300 * LibVarValue("ig_planwallmul", "1");
+		if (pm.blocked && before - after > 200) { wallpen += 0.15f * (before - after) / 300 * LibVarValue("ig_planwallmul", "1"); if (t < LibVarValue("ig_planwallsoon", "4")) o->wallhit = 1; }
 		flow += after;
 		flown++;
 		if (pm.pad || pm.teleport) break;	/* the navigation file knows where those go */
@@ -488,7 +571,7 @@ static void IGX_Simulate(igx_t *x, igopt_t *o)
 			if (pm.everhit & (CONTENTS_LAVA | CONTENTS_SLIME)) return;
 			VectorSet(vh, pm.vel[0], pm.vel[1], 0);
 			after = VectorLength(vh);
-			if (pm.blocked && before - after > 200) wallpen += 0.15f * (before - after) / 300 * LibVarValue("ig_planwallmul", "1");
+			if (pm.blocked && before - after > 200) { wallpen += 0.15f * (before - after) / 300 * LibVarValue("ig_planwallmul", "1"); }
 			if (pm.pad || pm.teleport) break;
 		}
 	}
@@ -771,14 +854,14 @@ int IG_Plan(bot_state_t *bs, bot_goal_t *goal, bot_moveresult_t *mr)
 			if (VectorNormalize(routedir) < 64) VectorCopy(igp_padtoland, routedir);
 			else igp_padroute = 1;
 		}
-	} else if (!IGX_RouteDir(&x, pm.org, pm.area, routedir)) {
+	} else if ((IGX_LookAhead(&x, pm.org, pm.area), !IGX_RouteDir(&x, pm.org, pm.area, routedir))) {
 		if (!ours) return 0;
 		VectorSet(routedir, bs->cur_ps.velocity[0], bs->cur_ps.velocity[1], 0);
 		if (VectorNormalize(routedir) < 1) return 0;
 	}
 
 	/* the options from here */
-#define OPT(K, H, J0, A, F, R, L) do { if (n < PLAN_MAXOPT) { igopt_t *o_ = &opts[n++]; o_->kind = K; o_->hop = H; o_->hookmul = 1; o_->landhop = 0; \
+#define OPT(K, H, J0, A, F, R, L) do { if (n < PLAN_MAXOPT) { igopt_t *o_ = &opts[n++]; o_->kind = K; o_->hop = H; o_->hookmul = 1; o_->landhop = 0; o_->wallhit = 0; \
 	o_->jump0 = J0; o_->anchor = A; o_->fire = F; o_->relafter = R; o_->letgo = L; } } while (0)
 	if (x.hook) {
 		OPT(PO_LETGO, 0, 0, -1, -1, 0, 1);
@@ -904,7 +987,7 @@ int IG_Plan(bot_state_t *bs, bot_goal_t *goal, bot_moveresult_t *mr)
 		int want_letgo = opts[pick].kind == PO_LETGO;
 
 		for (i = 0; i < n; i++)
-			if (opts[i].kind == PO_LANDHOP && opts[i].ok && (opts[i].letgo != 0) == want_letgo &&
+			if (opts[i].kind == PO_LANDHOP && opts[i].ok && !opts[i].wallhit && (opts[i].letgo != 0) == want_letgo &&
 				opts[i].cost <= opts[pick].cost + LibVarValue("ig_planairhopmargin", "0.5")) { pick = i; break; }
 	}
 
