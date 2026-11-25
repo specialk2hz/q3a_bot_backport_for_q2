@@ -603,6 +603,11 @@ static void IGX_Flick(bot_state_t *bs, const vec3_t view)
 	}
 }
 
+static float IGX_HSpeed(bot_state_t *bs)
+{
+	return sqrt(bs->cur_ps.velocity[0] * bs->cur_ps.velocity[0] + bs->cur_ps.velocity[1] * bs->cur_ps.velocity[1]);
+}
+
 int IG_Plan(bot_state_t *bs, bot_goal_t *goal, bot_moveresult_t *mr)
 {
 	igx_t x;
@@ -708,9 +713,16 @@ int IG_Plan(bot_state_t *bs, bot_goal_t *goal, bot_moveresult_t *mr)
 		/* T3, the pull hop: hop off the floor while the hook drags (friction eats the pull) */
 		if (ground) for (k = 2; k <= 3; k++) OPT(PO_HOLDHOP, 1, 0, -1, -1, k, 0);
 	} else {
+		/* Billy: "the bots sometimes just jump in place ... the jumping should be
+		 * in use for movement purposes". A hop from a standstill gains nothing (the
+		 * ground accelerates faster than the air), yet scored near the run and was
+		 * picked now and then -- after a respawn, say. On the ground, hops only
+		 * when already moving (ig_planhopmin u/s across, default 250). */
+		int hopok = !ground || IGX_HSpeed(bs) >= LibVarValue("ig_planhopmin", "250");
+
 		OPT(PO_RUN, 0, 0, -1, -1, 0, 0);
-		OPT(PO_HOP, 1, ground, -1, -1, 0, 0);
-		if (!ground || groundhop) { OPT(PO_LANDHOP, 0, 0, -1, -1, 0, 0); opts[n - 1].landhop = 1; }	/* hop the (next) landing */
+		if (hopok) OPT(PO_HOP, 1, ground, -1, -1, 0, 0);
+		if ((!ground || groundhop) && hopok) { OPT(PO_LANDHOP, 0, 0, -1, -1, 0, 0); opts[n - 1].landhop = 1; }	/* hop the (next) landing */
 		/* flicked onto an anchor last think: it can go now */
 		if (igp_state[c].anchorset && FloatTime() - igp_state[c].flicktime < 0.15f &&
 			FloatTime() - igp_state[c].flicktime > 0.001f && x.canfire) {
@@ -925,9 +937,32 @@ static void IGX_InputCheck(bot_state_t *bs, const bot_input_t *bi)
 				bi->viewangles[PITCH], bi->viewangles[YAW], igp_state[c].view[PITCH], igp_state[c].view[YAW]);
 }
 
+/* No jump from (near) a standstill (Billy: "the bots sometimes just jump in
+ * place when they dont have any movement ... the jumping should be in use for
+ * movement purposes"). On the final input: a jump the planner or the fight
+ * planner set this think, or the stock fight move's (its jumper trait), with
+ * under ig_planhopmin u/s across (default 250; 0 = off) goes. Kept: the
+ * slingshot's start (jump, then fire) and the stock route's own jumps (a
+ * ledge, a gap): those have a purpose. 8 maps x 2: jumps from under 100 u/s
+ * were 1544, of which landing hops after a slow landing were the most. */
+static void IGX_NoStandingJump(bot_state_t *bs, bot_input_t *bi)
+{
+	int c = bs->client;
+	float min = LibVarValue("ig_planhopmin", "250");
+
+	if (min <= 0 || !(bi->actionflags & (ACTION_JUMP | ACTION_DELAYEDJUMP)) || IGX_HSpeed(bs) >= min) return;
+	if (FloatTime() - igp_state[c].steered < 0.001f) {
+		if (FloatTime() - igp_state[c].decided < 0.001f &&
+			(igp_state[c].kind == PO_SLING || igp_state[c].kind == PO_FIRE)) return;	/* a slingshot's start */
+	} else if (strcmp(igp_node[c], "battle fight")) return;		/* the route's own */
+	bi->actionflags &= ~(ACTION_JUMP | ACTION_DELAYEDJUMP);
+	igp_state[c].landhop = 0;
+}
+
 void IG_PlanGuard(bot_state_t *bs, bot_input_t *bi)
 {
 	if (bs->client >= 0 && bs->client < MAX_CLIENTS) IGX_InputCheck(bs, bi);	/* diagnostics */
+	if (IG_PlanOn() && bs->client >= 0 && bs->client < MAX_CLIENTS && !BotIsDead(bs)) IGX_NoStandingJump(bs, bi);
 	igx_t x;
 	vec3_t eye, back, zero = {0, 0, 0};
 	int c = bs->client, jump, crouch;
@@ -1358,7 +1393,9 @@ int IG_PlanFight(bot_state_t *bs)
 
 			VectorSet(side, fwd[0] * cos(a) - fwd[1] * sin(a), fwd[0] * sin(a) + fwd[1] * cos(a), 0);
 			VectorCopy(side, opts[n].dir); opts[n].hop = 0; n++;
-			if (LibVarValue("ig_pfhop", "1")) { VectorCopy(side, opts[n].dir); opts[n].hop = 1; n++; }
+			if (LibVarValue("ig_pfhop", "1") && (bs->cur_ps.groundEntityNum == ENTITYNUM_NONE || IGX_HSpeed(bs) >= LibVarValue("ig_planhopmin", "250"))) {
+				VectorCopy(side, opts[n].dir); opts[n].hop = 1; n++;	/* no hop from a standstill (ig_planhopmin) */
+			}
 		}
 	VectorCopy(fwd, opts[n].dir); opts[n].hop = 0; n++;
 	VectorScale(fwd, -1, opts[n].dir); opts[n].hop = 0; n++;
