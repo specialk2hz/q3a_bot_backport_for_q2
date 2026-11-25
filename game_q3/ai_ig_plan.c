@@ -1094,6 +1094,13 @@ static int IGX_Sees(bot_state_t *bs, const vec3_t eye, const vec3_t target)
 }
 
 static float igf_lat, igf_peek;	/* tuning (libvars ig_pflat, ig_pfpeek), read once a think */
+/* Position (Billy: the fight planner was "even, slower-paced, worse positioned"):
+ * where a dodge leaves the bot on the way to its long-term goal -- the roam's
+ * hunt or high-ground point, or the item it was after -- against where it is
+ * now (ig_pfroute, per second of travel saved), and the higher ground
+ * (ig_pfhigh, at 200+ units above the enemy). igf_tt0: travel time from here. */
+static float igf_route, igf_high, igf_near, igf_nearat;
+static int igf_tt0;
 
 static void IGX_FightSim(igx_t *x, igfopt_t *o, const vec3_t enemyeye, float ready, float skill)
 {
@@ -1133,13 +1140,23 @@ static void IGX_FightSim(igx_t *x, igfopt_t *o, const vec3_t enemyeye, float rea
 		/* range: rails reach anywhere, but too close is a coin toss and too far a duel of luck */
 		if (d < 250) cost += 0.02f;
 		else if (d > 1400) cost += 0.01f;
+		/* closing in: the stock attack move walks to 140 units, and a rail's
+		 * aim error is an angle, so the nearer, the surer (ig_pfnear, per
+		 * think per 1000 units beyond ig_pfnearat) */
+		if (igf_near > 0 && d > igf_nearat) cost += igf_near * (d - igf_nearat) / 1000;
 	}
 	if (IGX_EndUnsafe(x, &pm)) return;
+	if (igf_route > 0 && x->goalarea && igf_tt0) {
+		int tt = pm.area == x->goalarea ? 0 : pm.area ? AAS_AreaTravelTimeToGoalArea(pm.area, pm.org, x->goalarea, x->tfl) : 0;
+
+		if (pm.area == x->goalarea || tt) cost += igf_route * (tt - igf_tt0) * 0.01f;
+		else cost += 0.2f;	/* off the route */
+	}
 	lat /= FIGHT_THINKS;
 	cost -= igf_lat * skill * (lat > 450 ? 1.5f : lat / 300);
 	/* the higher ground */
 	d = pm.org[2] - (enemyeye[2] - 22);
-	cost -= 0.03f * (d > 200 ? 1 : d < -200 ? -1 : d / 200);
+	cost -= igf_high * (d > 200 ? 1 : d < -200 ? -1 : d / 200);
 	o->cost = cost + wallpen;
 	o->ok = 1;
 }
@@ -1293,6 +1310,21 @@ int IG_PlanFight(bot_state_t *bs)
 
 	igf_lat = LibVarValue("ig_pflat", "0.12");
 	igf_peek = LibVarValue("ig_pfpeek", "1");
+	igf_route = LibVarValue("ig_pfroute", "0");
+	igf_high = LibVarValue("ig_pfhigh", "0.03");
+	igf_near = LibVarValue("ig_pfnear", "0");
+	igf_nearat = LibVarValue("ig_pfnearat", "300");
+	igf_tt0 = 0;
+	if (igf_route > 0) {
+		bot_goal_t goal;
+
+		if (trap_BotGetTopGoal(bs->gs, &goal) && goal.areanum) {
+			x.goalarea = goal.areanum;
+			VectorCopy(goal.origin, x.goalorg);
+			x.tfl = bs->tfl;
+			igf_tt0 = bs->areanum == goal.areanum ? 0 : AAS_AreaTravelTimeToGoalArea(bs->areanum, bs->origin, goal.areanum, bs->tfl);
+		}
+	}
 	for (s = -1; s <= 1; s += 2)
 		for (i = 0; i < 3; i++) {
 			float a = DEG2RAD(90 * s + angles[i] * s);
@@ -1335,4 +1367,3 @@ int IG_PlanFight(bot_state_t *bs)
 		BotAI_Print(PRT_MESSAGE, "igfight %d opt %d hop %d cost %.2f best %.2f ready %.2f\n", c, pick, opts[pick].hop, opts[pick].cost, best, ready);
 	return 1;
 }
-
