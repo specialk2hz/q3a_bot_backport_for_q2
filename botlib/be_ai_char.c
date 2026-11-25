@@ -638,6 +638,19 @@ int CheckCharacteristicIndex(int character, int index)
 // Returns:				-
 // Changes Globals:		-
 //===========================================================================
+/* IG-40: a characteristic the character file may leave out (the fork's own,
+ * 49 and up): true and its value when it is set, false -- and no error
+ * print, which Characteristic_Float makes on every read -- when it is not. */
+int Characteristic_IGFloat(int character, int index, float *out)
+{
+	bot_character_t *ch = BotCharacterFromHandle(character);
+
+	if (!ch || index < 0 || index >= MAX_CHARACTERISTICS) return 0;
+	if (ch->c[index].type == CT_INTEGER) { *out = (float) ch->c[index].value.integer; return 1; }
+	if (ch->c[index].type == CT_FLOAT) { *out = ch->c[index].value._float; return 1; }
+	return 0;
+}
+
 float Characteristic_Float(int character, int index)
 {
 	bot_character_t *ch;

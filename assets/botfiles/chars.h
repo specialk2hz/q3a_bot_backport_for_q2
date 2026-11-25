@@ -126,4 +126,7 @@
 //IG-21: how much the bot likes the grapple: 0 a runner, 1 a grapple master;
 //above 1 (default_c.c: 9): worked out from JUMPER and AGGRESSION (game_q3/ai_ig_sling.c)
 #define CHARACTERISTIC_IG_HOOK						49	//float [0, 1]
+//strafe-jump skill: the share of the most speed a strafe can add, 0.45 casual .. 0.9 near perfect
+//(Billy ~0.65); left out, it is worked out from the jumper and attack-skill characteristics (IG-40)
+#define CHARACTERISTIC_IG_STRAFE					50	//float [0, 1]
 

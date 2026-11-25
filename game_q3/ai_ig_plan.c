@@ -91,6 +91,7 @@ typedef struct {
 	float		hookcost;					/* the price of firing a hook, s */
 	float		flow;						/* s per 300 u/s of average speed kept (ig_planflow) */
 	float		pullfloor;					/* s per 50 ms pulled along the floor (ig_planpullfloor) */
+	float		strafeskill;				/* IG_StrafeSkill: the share of a strafe's most speed */
 	int			released, reljumps;			/* in a simulation: the hook let go, and the jumps made by then */
 	int			slinghop;					/* slingshots are flown with Billy's finish (ig_planslinghop) */
 	vec3_t		hookpos, hookdir;
@@ -193,7 +194,88 @@ static int IGX_RouteDir(igx_t *x, const vec3_t org, int area, vec3_t dir)
 /* In the air: the wish that keeps the most speed while turning toward the
  * route (Q2's air accel 1 adds speed only within acos(285/speed) of the
  * velocity -- the strafe-jump angle). */
-static void IGX_AirWish(const vec3_t vel, const vec3_t route, vec3_t wish)
+/* The bot's strafe-jump skill (Billy: "some great bots and some not so great
+ * in the game at once"): the share of the most speed a strafe can add. From
+ * the character file's characteristic 50 when it is set, else from its
+ * jumper and attack skill (0.45 .. 0.90). libvar ig_planstrafeskill 0..1
+ * sets it for every bot (testing). */
+#define CHARACTERISTIC_IG_STRAFE	50
+int Characteristic_IGFloat(int character, int index, float *out);
+float IG_StrafeSkill(bot_state_t *bs)
+{
+	float v = LibVarValue("ig_planstrafeskill", "2"), j, a;	/* above 1: not set (libvars take no negatives) */
+
+	if (v <= 1) return v;
+	if (Characteristic_IGFloat(bs->character, CHARACTERISTIC_IG_STRAFE, &v) && v > 0 && v <= 1) return v;
+	j = trap_Characteristic_BFloat(bs->character, CHARACTERISTIC_JUMPER, 0, 1);
+	a = trap_Characteristic_BFloat(bs->character, CHARACTERISTIC_ATTACK_SKILL, 0, 1);
+	return 0.45f + 0.45f * (0.5f * j + 0.5f * a);
+}
+
+/* The strafe angle for a skill. A bot's wish holds for a whole think, two
+ * 50 ms pmoves; the one-step best angle, acos(285/speed), adds 15 u/s in the
+ * first and much less in the second, the velocity having turned toward the
+ * wish (measured: +12 a think where one-step theory says +24). So the angle
+ * is the best for the two steps together (IGX_Strafe2, a table by speed made
+ * once), and a skill below 1 is the wider angle that adds that share of it --
+ * still a strafe, still the swing, less speed. */
+static float IGX_Strafe2(float v, float phi)
+{
+	float vx = v, vy = 0, wx = cos(phi), wy = sin(phi), add, acc;
+	int i;
+
+	for (i = 0; i < 2; i++) {
+		add = 300 - (vx * wx + vy * wy);
+		if (add <= 0) continue;
+		acc = add < 15 ? add : 15;
+		vx += acc * wx;
+		vy += acc * wy;
+	}
+	return sqrt(vx * vx + vy * vy) - v;
+}
+
+#define IGX_STRAFE_V0	300
+#define IGX_STRAFE_N	131		/* 300 .. 1600 u/s by 10 */
+static float igx_bestphi[IGX_STRAFE_N], igx_bestgain[IGX_STRAFE_N];
+
+static float IGX_StrafeAngle(float sp, float skill)
+{
+	static int made;
+	float target, lo, hi, mid, best;
+	int i, k;
+
+	if (!made) {
+		for (i = 0; i < IGX_STRAFE_N; i++) {
+			float v = IGX_STRAFE_V0 + 10 * i, g, bp = 0, bg = -1;
+
+			for (k = 0; k <= 900; k++) {		/* 0.1-degree steps */
+				g = IGX_Strafe2(v, DEG2RAD(k * 0.1f));
+				if (g > bg) { bg = g; bp = DEG2RAD(k * 0.1f); }
+			}
+			igx_bestphi[i] = bp;
+			igx_bestgain[i] = bg;
+		}
+		made = 1;
+	}
+	if (sp < IGX_STRAFE_V0) sp = IGX_STRAFE_V0;
+	i = (int)((sp - IGX_STRAFE_V0) / 10 + 0.5f);
+	if (i >= IGX_STRAFE_N) i = IGX_STRAFE_N - 1;
+	best = igx_bestphi[i];
+	if (skill >= 0.999f) return best;
+	/* the wider angle where the gain is skill times the best (the gain falls
+	 * off steadily from the best angle toward 90 degrees) */
+	target = skill * igx_bestgain[i];
+	lo = best;
+	hi = DEG2RAD(89.0f);
+	for (k = 0; k < 14; k++) {
+		mid = 0.5f * (lo + hi);
+		if (IGX_Strafe2(sp, mid) > target) lo = mid;
+		else hi = mid;
+	}
+	return 0.5f * (lo + hi);
+}
+
+static void IGX_AirWish(const vec3_t vel, const vec3_t route, vec3_t wish, float skill)
 {
 	vec3_t vh;
 	float sp, theta, a, side, c, s;
@@ -204,7 +286,7 @@ static void IGX_AirWish(const vec3_t vel, const vec3_t route, vec3_t wish)
 		VectorCopy(route, wish);
 		return;
 	}
-	theta = acos(285.0f / sp > 1 ? 1 : 285.0f / sp);
+	theta = IGX_StrafeAngle(sp, skill);
 	a = acos(DotProduct(vh, route) > 1 ? 1 : DotProduct(vh, route) < -1 ? -1 : DotProduct(vh, route));
 	/* Always at the strafe-jump angle, on the route's side -- also when
 	 * the route runs straight ahead: wishing along the velocity above 300
@@ -262,7 +344,7 @@ static void IGX_Input(igx_t *x, const igopt_t *o, int t, const igpm_t *pm, const
 		in->jump = (t == 0 && o->jump0) || o->hop || (o->landhop && (x->released || in->letgo) && pm->jumps == x->reljumps && (in->letgo || pm->hook < 2));
 	} else {
 		if (pm->hook >= 2) VectorCopy(routedir, in->wish);
-		else IGX_AirWish(pm->vel, routedir, in->wish);
+		else IGX_AirWish(pm->vel, routedir, in->wish, x->strafeskill);
 		/* pressed while coming down, the jump goes off on the landing frame:
 		 * Billy's slingshot (demo, 2026-11-25) lets go in the air and has jump
 		 * down before he lands -- off the floor again within 8 ms, 860-940 u/s
@@ -550,6 +632,21 @@ int IG_Plan(bot_state_t *bs, bot_goal_t *goal, bot_moveresult_t *mr)
 	x.jumpland = trap_Cvar_VariableIntegerValue("ig_jumpland");
 	x.canfire = IG_CanFireHook(c);
 	x.flow = LibVarValue("ig_planflow", "0.2");
+	x.strafeskill = IG_StrafeSkill(bs);
+	{	/* once per bot and map: its strafe skill, for the logs */
+		static int shown[MAX_CLIENTS];
+		static float lastt;
+		int k2;
+		char name[MAX_NETNAME];
+
+		if (FloatTime() < lastt) for (k2 = 0; k2 < MAX_CLIENTS; k2++) shown[k2] = 0;
+		lastt = FloatTime();
+		if (!shown[c]) {
+			shown[c] = 1;
+			ClientName(c, name, sizeof(name));
+			BotAI_Print(PRT_MESSAGE, "ig: strafeskill %d %.2f %s\n", c, x.strafeskill, name);
+		}
+	}
 	urge = IG_PlanRepositionUrge(c);
 	x.pullfloor = LibVarValue("ig_planpullfloor", "0.25");
 	/* a slingshot is flown with Billy's finish -- let go before the floor,
@@ -1129,7 +1226,7 @@ static int IGX_FightFlight(bot_state_t *bs)
 		if (sp < 1) return 0;
 		igp_state[c].fightside = -igp_state[c].fightside;
 		if (!igp_state[c].fightside) igp_state[c].fightside = 1;
-		th = sp > 300 ? acos(285.0f / sp) : 0;
+		th = sp > 300 ? IGX_StrafeAngle(sp, IG_StrafeSkill(bs)) : 0;
 		s = sin(th) * igp_state[c].fightside;
 		VectorSet(wish, vh[0] * cos(th) - vh[1] * s, vh[0] * s + vh[1] * cos(th), 0);
 	}
