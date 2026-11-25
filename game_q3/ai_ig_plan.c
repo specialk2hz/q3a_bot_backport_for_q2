@@ -452,7 +452,7 @@ int IG_Plan(bot_state_t *bs, bot_goal_t *goal, bot_moveresult_t *mr)
 	x.tfl = bs->tfl;
 	x.jumpland = trap_Cvar_VariableIntegerValue("ig_jumpland");
 	x.canfire = IG_CanFireHook(c);
-	x.hookcost = LibVarValue("ig_planhookcost", "0.3") * (1.6f - IG_PlanAffinity(bs)) / (1.6f - 0.55f);
+	x.hookcost = LibVarValue("ig_planhookcost", "0.5") * (1.6f - IG_PlanAffinity(bs)) / (1.6f - 0.55f);
 	VectorCopy(bs->viewangles, x.lastview);
 	if (x.lastview[PITCH] > 180) x.lastview[PITCH] -= 360;
 	if (igp_state[c].flicktime > 0 && FloatTime() - igp_state[c].flicktime < 0.15f && FloatTime() - igp_state[c].flicktime > 0.001f)
@@ -552,7 +552,8 @@ int IG_Plan(bot_state_t *bs, bot_goal_t *goal, bot_moveresult_t *mr)
 	for (i = 0; i < n; i++) {
 		w[i] = 0;
 		if (!opts[i].ok || opts[i].cost > bestcost + PLAN_MARGIN) continue;
-		w[i] = opts[i].kind == PO_SLING || opts[i].kind == PO_FIRE ? IG_PlanAffinity(bs) * 2 : 1;
+		/* ig_planhookpick: how much a hook is favoured among near-equal options (1 = not at all) */
+		w[i] = opts[i].kind == PO_SLING || opts[i].kind == PO_FIRE ? 1 + (IG_PlanAffinity(bs) * 2 - 1) * LibVarValue("ig_planhookpick", "1") : 1;
 		total += w[i];
 	}
 	r = random() * total;
