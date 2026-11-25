@@ -46,6 +46,8 @@ int AAS_PointAreaNum(vec3_t point);
 int AAS_PointContents(vec3_t point);
 float LibVarValue(const char *var_name, const char *value);
 void EA_IGMove(int client, vec3_t dir, float speed, int jump, int crouch);
+bot_goal_t *IG_PadDrillGoal(int client);	/* IG-43, be_ai_move.c */
+void IG_PadDrillNoteTop(int client);
 
 #define PLAN_THINKS		12		/* 1.2 s ahead */
 #define PLAN_MARGIN		0.06f	/* options this close to the best are all fair picks (s) */
@@ -584,16 +586,21 @@ static void IGX_Anchors(igx_t *x, const vec3_t routedir)
  * frame on the ground. The old end-of-arc hook pulled down onto the floor just
  * past the landing and gained nothing. Anchors from the top of a pad flight:
  * along the route past the landing, level to 10 up, 300+ units, walls too. */
-static void IGX_PadAnchors(igx_t *x, const vec3_t routedir)
+static void IGX_PadAnchors(igx_t *x, const vec3_t routedir, const vec3_t toland, int hasroute)
 {
-	static const float yaws[3] = {-16, 0, 16}, pitches[5] = {6, 2, -3, -8, -12};
-	float baseyaw = atan2(routedir[1], routedir[0]) * 180 / M_PI;
+	static const float yaws[3] = {-12, 0, 12}, pitches[3] = {2, -3, -8};
+	float landyaw = atan2(toland[1], toland[0]) * 180 / M_PI, routeyaw = atan2(routedir[1], routedir[0]) * 180 / M_PI;
 	int i, j;
 
 	x->numanchors = 0;
+	/* toward the landing (Billy's hook went for the walkway he was flying to) */
 	for (i = 0; i < 3; i++)
-		for (j = 0; j < 5; j++)
-			IGX_AnchorTry(x, pitches[j], baseyaw + yaws[i], 300, IGA_PADTOP);
+		for (j = 0; j < 3; j++)
+			IGX_AnchorTry(x, pitches[j], landyaw + yaws[i], 300, IGA_PADTOP);
+	/* and along the route past it */
+	if (hasroute)
+		for (j = 0; j < 3; j++)
+			IGX_AnchorTry(x, pitches[j], routeyaw, 300, IGA_PADTOP);
 }
 
 static float IGX_ClassMul(int cls)
@@ -627,7 +634,8 @@ static void IGX_Flick(bot_state_t *bs, const vec3_t view)
 }
 
 static int		igp_padmode;	/* IG_Plan called by IG_PlanPadTop: a pad flight */
-static vec3_t	igp_padland;
+static vec3_t	igp_padland, igp_padtoland;
+static int		igp_padroute;
 
 static float IGX_HSpeed(bot_state_t *bs)
 {
@@ -730,14 +738,16 @@ int IG_Plan(bot_state_t *bs, bot_goal_t *goal, bot_moveresult_t *mr)
 		VectorCopy(igp_padland, up);
 		up[2] += 16;
 		la = AAS_PointAreaNum(up);
-		if (!la || !IGX_RouteDir(&x, up, la, routedir)) {
-			/* the landing's own area has no step (often the goal's): toward the goal */
+		VectorSubtract(igp_padland, bs->origin, igp_padtoland);
+		igp_padtoland[2] = 0;
+		VectorNormalize(igp_padtoland);
+		igp_padroute = la && IGX_RouteDir(&x, up, la, routedir);
+		if (!igp_padroute) {
+			/* the landing's own area has no step (it is the goal's, say): toward the goal, else the landing */
 			VectorSubtract(goal->origin, igp_padland, routedir);
 			routedir[2] = 0;
-			if (VectorNormalize(routedir) < 64) {
-				if (trap_Cvar_VariableIntegerValue("ig_plandebug") == 3) BotAI_Print(PRT_MESSAGE, "igpad %d noroute area %d\n", c, la);
-				return 0;
-			}
+			if (VectorNormalize(routedir) < 64) VectorCopy(igp_padtoland, routedir);
+			else igp_padroute = 1;
 		}
 	} else if (!IGX_RouteDir(&x, pm.org, pm.area, routedir)) {
 		if (!ours) return 0;
@@ -774,7 +784,7 @@ int IG_Plan(bot_state_t *bs, bot_goal_t *goal, bot_moveresult_t *mr)
 		if (igp_padmode) {
 			/* the top of the arc, once a flight (Billy fired falling at 214) */
 			if (x.canfire && !igp_state[c].padfired && bs->cur_ps.velocity[2] < LibVarValue("ig_planpadtopvz", "150")) {
-				IGX_PadAnchors(&x, routedir);
+				IGX_PadAnchors(&x, routedir, igp_padtoland, igp_padroute);
 				for (i = 0; i < x.numanchors; i++)
 					{ OPT(PO_SLING, 0, 0, i, 1, 3, 0); opts[n - 1].hookmul = IGX_ClassMul(x.anchorclass[i]); opts[n - 1].landhop = x.slinghop; }
 			}
@@ -916,7 +926,7 @@ int IG_Plan(bot_state_t *bs, bot_goal_t *goal, bot_moveresult_t *mr)
 			IG_NoteHookFire(c);
 			IG_GrappleTravelNote(c);
 			igp_state[c].hookout = 1;
-			if (igp_padmode) igp_state[c].padfired = 1;
+			if (igp_padmode) { igp_state[c].padfired = 1; IG_PadDrillNoteTop(c); }
 			igp_state[c].anchorset = 0;
 			AngleVectors(x.lastview, igp_state[c].firedir, NULL, NULL);
 			VectorSubtract(igp_state[c].anchor, eye, d);
@@ -1504,6 +1514,7 @@ int IG_PlanPadTop(bot_state_t *bs, bot_goal_t *goal, bot_moveresult_t *mr)
 
 	if (!IG_PlanOn() || !LibVarValue("ig_planpadsling", "0") || bs->client < 0 || bs->client >= MAX_CLIENTS) return 0;
 	if (!IG_PadFlight(bs->client, igp_padland)) return 0;
+	{ bot_goal_t *dg = IG_PadDrillGoal(bs->client); if (dg) goal = dg; }	/* IG-43's pad drill */
 	igp_padmode = 1;
 	r = IG_Plan(bs, goal, mr);
 	igp_padmode = 0;

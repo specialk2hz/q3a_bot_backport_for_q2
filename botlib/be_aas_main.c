@@ -277,6 +277,7 @@ int AAS_LoadMap(const char *mapname)
 	AAS_InitAASLinkHeap();
 	//initialize the AAS linked entities for the new map
 	AAS_InitAASLinkedEntities();
+	IG_PadReachAtLoad(); /* IG: IG-43, pad routes for straight-up pads (links and settings ready, routing not yet) */
 	//initialize reachability for the new map
 	AAS_InitReachability();
 	//initialize the alternative routing

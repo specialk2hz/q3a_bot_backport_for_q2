@@ -1396,3 +1396,154 @@ int IG_ClimbLand(int client, const vec3_t origin, const vec3_t velocity, const v
 	view[0] = 0;
 	return 1;
 }
+
+/* IG-43 pad routes (libvar ig_padreach, default 0; only with the hook,
+ * ig_rs_startgrapple > 0). A Q2 trigger_push that throws straight up has no
+ * landing of its own: bspc makes a pad route only where the throw, or a
+ * little air control (under 150 u/s across), lands somewhere, so the bots
+ * never take q2rdm11's two up-pads -- and one dropped onto them bounced
+ * forever (IG-42). Billy takes them with his hook: straight up, a turn, at the
+ * top a level hook along the upper walkway, 938 u/s (recorded 2026-11-25).
+ * Here, at load, before the routing: for each such pad with no pad route out,
+ * the top of its arc, and from it the floors in sight 150-900 units across,
+ * up to 350 below the top (and 32 above), no lava or slime, in the same
+ * routing cluster -- the farthest in each of 8 directions -- become
+ * TRAVEL_JUMPPAD routes. The bot then takes the pad like any other; in the
+ * air the planner's pad top (ai_ig_plan.c) hooks it there, or it falls back
+ * onto the pad and IG-42's steering takes it off. The pad area's block of
+ * routes moves to the end of the table, so no other route's number changes
+ * (the climb tables and recorded routes name routes by number). */
+extern int AAS_GetJumpPadInfo(int ent, vec3_t areastart, vec3_t absmins, vec3_t absmaxs, vec3_t velocity);
+
+#define IG_PR_DIRS 8
+static int ig_padreaches[64], ig_numpadreaches;
+
+int IG_PadReachList(int *out, int max)	/* IG-43: the routes added, for the pad drill */
+{
+	int i;
+
+	for (i = 0; i < ig_numpadreaches && i < max; i++) out[i] = ig_padreaches[i];
+	return i;
+}
+
+void IG_PadReachAtLoad(void)
+{
+	int ent, a, i, k, added = 0, pads = 0, skipped = 0, padareas[16], npad, newsize;
+	char classname[MAX_EPAIRKEY];
+	vec3_t start, mins, maxs, vel, apex, p, d;
+	aas_link_t *areas, *link;
+	aas_reachability_t extra[16][IG_PR_DIRS], *nr;
+	int nextra[16];
+	float g = aassettings.phys_gravity > 0 ? aassettings.phys_gravity : 800;
+
+	ig_numpadreaches = 0;
+	if (!LibVarValue("ig_padreach", "0") || LibVarGetValue("ig_rs_startgrapple") <= 0) return;
+	for (ent = AAS_NextBSPEntity(0); ent; ent = AAS_NextBSPEntity(ent)) {
+		int best[IG_PR_DIRS];
+		float bestd[IG_PR_DIRS], h;
+
+		if (!AAS_ValueForBSPEpairKey(ent, "classname", classname, MAX_EPAIRKEY) || strcmp(classname, "trigger_push")) continue;
+		if (!AAS_GetJumpPadInfo(ent, start, mins, maxs, vel)) continue;
+		if (LibVarValue("ig_padreachdebug", "0")) botimport.Print(PRT_MESSAGE, "ig: push ent %d at %.0f %.0f %.0f vel %.0f %.0f %.0f\n", ent, start[0], start[1], start[2], vel[0], vel[1], vel[2]);
+		if (vel[0] * vel[0] + vel[1] * vel[1] > 200 * 200 || vel[2] < 300) continue;	/* (nearly) straight up only: q2rdm11's throw 89-113 across */
+		areas = AAS_LinkEntityClientBBox(mins, maxs, -1, PRESENCE_CROUCH);
+		if (LibVarValue("ig_padreachdebug", "0"))
+			for (link = areas; link; link = link->next_area) {
+				int r, n = aasworld.areasettings[link->areanum].numreachableareas, f = aasworld.areasettings[link->areanum].firstreachablearea;
+				botimport.Print(PRT_MESSAGE, "ig: padpush at %.0f %.0f %.0f vel %.0f %.0f %.0f area %d jumppad %d reaches %d\n", start[0], start[1], start[2], vel[0], vel[1], vel[2],
+								link->areanum, AAS_AreaJumpPad(link->areanum), n);
+				for (r = 0; r < n; r++)
+					botimport.Print(PRT_MESSAGE, "ig:   reach %d type %d to %d\n", f + r, aasworld.reachability[f + r].traveltype & TRAVELTYPE_MASK, aasworld.reachability[f + r].areanum);
+			}
+		npad = 0;
+		for (link = areas; link; link = link->next_area) {
+			int r, has = 0, n = aasworld.areasettings[link->areanum].numreachableareas, f = aasworld.areasettings[link->areanum].firstreachablearea;
+
+			if (!AAS_AreaJumpPad(link->areanum)) continue;
+			for (r = 0; r < n; r++)
+				if ((aasworld.reachability[f + r].traveltype & TRAVELTYPE_MASK) == TRAVEL_JUMPPAD) has = 1;
+			if (!has && npad < 16) padareas[npad++] = link->areanum;
+		}
+		AAS_UnlinkFromAreas(areas);
+		if (!npad) continue;
+		pads++;
+		h = vel[2] * vel[2] / (2 * g);
+		VectorCopy(start, apex);
+		apex[2] += h - 8;
+		for (k = 0; k < IG_PR_DIRS; k++) { best[k] = 0; bestd[k] = 0; }
+		for (a = 1; a < aasworld.numareas; a++) {
+			aas_area_t *ar = &aasworld.areas[a];
+			aas_trace_t tr;
+			float hd;
+
+			if (!AAS_AreaGrounded(a)) continue;
+			if (aasworld.areasettings[a].contents & (AREACONTENTS_LAVA | AREACONTENTS_SLIME | AREACONTENTS_JUMPPAD)) continue;
+			VectorSet(p, ar->center[0], ar->center[1], ar->mins[2] + 1);
+			if (AAS_PointAreaNum(p) != a) continue;
+			if (p[2] < apex[2] - 350 || p[2] > apex[2] + 32) continue;
+			VectorSubtract(p, apex, d);
+			d[2] = 0;
+			hd = VectorLength(d);
+			if (hd < 150 || hd > 900) continue;
+			for (i = 0; i < npad; i++) {	/* the routing ignores a route out of its cluster */
+				int c1 = aasworld.areasettings[padareas[i]].cluster, c2 = aasworld.areasettings[a].cluster;
+				if (c1 == c2 || c1 < 0 || c2 < 0) break;
+			}
+			if (i == npad) { skipped++; continue; }
+			k = ((int) floor((atan2(d[1], d[0]) + M_PI) / (2 * M_PI) * IG_PR_DIRS)) % IG_PR_DIRS;
+			if (hd <= bestd[k]) continue;
+			tr = AAS_TraceClientBBox(apex, p, PRESENCE_NORMAL, -1);
+			if (tr.startsolid || tr.fraction < 1) continue;
+			best[k] = a; bestd[k] = hd;
+		}
+		for (i = 0; i < npad; i++) {
+			nextra[i] = 0;
+			for (k = 0; k < IG_PR_DIRS; k++) {
+				aas_reachability_t *r;
+				int c1 = aasworld.areasettings[padareas[i]].cluster, c2;
+
+				if (!best[k]) continue;
+				c2 = aasworld.areasettings[best[k]].cluster;
+				if (!(c1 == c2 || c1 < 0 || c2 < 0)) continue;
+				r = &extra[i][nextra[i]++];
+				Com_Memset(r, 0, sizeof(*r));
+				r->areanum = best[k];
+				r->facenum = (int) vel[2];		/* as bspc's pad routes: the throw's z speed */
+				r->edgenum = 0;					/* and its speed across */
+				VectorCopy(start, r->start);
+				VectorSet(r->end, aasworld.areas[best[k]].center[0], aasworld.areas[best[k]].center[1], aasworld.areas[best[k]].mins[2] + 1);
+				/* up, a hook's flight, the pull across, and a price for the trick */
+				r->traveltime = (unsigned short) (100 * (vel[2] / g + 0.3f + bestd[k] / 800 + LibVarValue("ig_padreachprice", "0.2")));
+				r->traveltype = TRAVEL_JUMPPAD;
+			}
+			if (!nextra[i]) continue;
+			/* this pad area's block, moved to the end with the new routes after it */
+			{
+				aas_areasettings_t *as = &aasworld.areasettings[padareas[i]];
+
+				newsize = aasworld.reachabilitysize + as->numreachableareas + nextra[i];
+				nr = (aas_reachability_t *) GetClearedMemory(newsize * sizeof(aas_reachability_t));
+				Com_Memcpy(nr, aasworld.reachability, aasworld.reachabilitysize * sizeof(aas_reachability_t));
+				Com_Memcpy(nr + aasworld.reachabilitysize, aasworld.reachability + as->firstreachablearea, as->numreachableareas * sizeof(aas_reachability_t));
+				Com_Memcpy(nr + aasworld.reachabilitysize + as->numreachableareas, extra[i], nextra[i] * sizeof(aas_reachability_t));
+				as->firstreachablearea = aasworld.reachabilitysize;
+				as->numreachableareas += nextra[i];
+				FreeMemory(aasworld.reachability);
+				aasworld.reachability = nr;
+				aasworld.reachabilitysize = newsize;
+			}
+			for (k = 0; k < nextra[i]; k++)
+				if (ig_numpadreaches < 64) ig_padreaches[ig_numpadreaches++] = aasworld.reachabilitysize - nextra[i] + k;
+			for (k = 0; k < nextra[i]; k++)
+				botimport.Print(PRT_MESSAGE, "ig: padreach area %d -> %d end %.0f %.0f %.0f time %d top %.0f\n", padareas[i], extra[i][k].areanum,
+								extra[i][k].end[0], extra[i][k].end[1], extra[i][k].end[2], extra[i][k].traveltime, apex[2]);
+			added += nextra[i];
+		}
+	}
+	if (added && ig_blocked && ig_blockedsize < aasworld.reachabilitysize) {	/* IG-6's per-route marks: room for the new numbers */
+		unsigned char *nb = calloc(aasworld.reachabilitysize, 1);
+
+		if (nb) { memcpy(nb, ig_blocked, ig_blockedsize); free(ig_blocked); ig_blocked = nb; ig_blockedsize = aasworld.reachabilitysize; }
+	}
+	if (pads) botimport.Print(PRT_MESSAGE, "ig: %d pad routes added from %d straight-up pads (%d floors in another cluster)\n", added, pads, skipped);
+}

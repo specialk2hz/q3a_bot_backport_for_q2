@@ -3752,6 +3752,92 @@ static void IG_AirNoRoute(bot_movestate_t *ms, bot_goal_t *goal, int travelflags
 				ms->origin[0], ms->origin[1], ms->origin[2]);
 }
 
+/* IG-43 pad drill (libvar ig_paddrill 1, a testing aid like IG-37's): the
+* first bot, over and over, is put 48 units short of one of the pad routes
+ * IG_PadReachAtLoad added (in turn), with that route's landing floor as its
+ * goal; "ok" when it stands on that floor's level within 6 s. The planner's
+ * pad top takes the same goal (IG_PadDrillGoal). */
+static struct { int client, idx, phase, reach; float t0; int padtop; } igpd = { -1 };
+static bot_goal_t igpd_goal;
+
+bot_goal_t *IG_PadDrillGoal(int client)
+{
+	return (igpd.client == client && igpd.phase == 2) ? &igpd_goal : NULL;
+}
+
+void IG_PadDrillNoteTop(int client)
+{
+	if (igpd.client == client) igpd.padtop = 1;
+}
+
+static int IG_PadDrill(bot_movestate_t *ms, bot_moveresult_t *result)
+{
+	int list[64], n;
+	float now = AAS_Time();
+	aas_reachability_t *r;
+	vec3_t dir, ang, at;
+	char cmd[128];
+
+	if (!LibVarValue("ig_paddrill", "0")) { igpd.client = -1; return 0; }
+	if (igpd.client < 0) { igpd.client = ms->client; igpd.idx = 0; igpd.phase = 0; }
+	if (igpd.client != ms->client) return 0;
+	n = IG_PadReachList(list, 64);
+	if (!n) return 0;
+	switch (igpd.phase) {
+	case 0:		/* place */
+		igpd.reach = list[igpd.idx++ % n];
+		r = &aasworld.reachability[igpd.reach];
+		VectorSubtract(r->end, r->start, dir);
+		dir[2] = 0;
+		VectorNormalize(dir);
+		VectorMA(r->start, -48, dir, at);
+		vectoangles(dir, ang);
+		Com_sprintf(cmd, sizeof(cmd), "igdrillpos %d_%d_%d_%d", (int) at[0], (int) at[1], (int) r->start[2] + 8, (int) ang[YAW]);
+		EA_Command(ms->client, cmd);
+		Com_Memset(&igpd_goal, 0, sizeof(igpd_goal));
+		VectorCopy(r->end, igpd_goal.origin);
+		igpd_goal.areanum = r->areanum;
+		VectorSet(igpd_goal.mins, -8, -8, -8);
+		VectorSet(igpd_goal.maxs, 8, 8, 8);
+		igpd.phase = 1; igpd.t0 = now; igpd.padtop = 0;
+		return 1;
+	case 1:		/* settle */
+		if (now - igpd.t0 < 0.4f) return 1;
+		igpd.phase = 2; igpd.t0 = now;
+		return 2;
+	case 2:		/* go */
+		r = &aasworld.reachability[igpd.reach];
+		if ((ms->moveflags & MFL_ONGROUND) && ms->origin[2] > r->end[2] - 40 && now - igpd.t0 > 0.5f) {
+			VectorSubtract(r->end, ms->origin, dir);
+			botimport.Print(PRT_MESSAGE, "igpaddrill reach %d ok time %.2f padtop %d left %.0f\n", igpd.reach, now - igpd.t0, igpd.padtop, VectorLength(dir));
+			igpd.phase = 3; igpd.t0 = now;
+			return 1;
+		}
+		/* ig_paddrillforce: the pad route itself, walked onto the pad as the
+		 * stock pad travel does, then its flight (BotFinishTravel_JumpPad) */
+		if (LibVarValue("ig_paddrillforce", "0") && now - igpd.t0 < 6) {
+			ms->lastreachnum = igpd.reach;
+			ms->reachareanum = r->areanum;
+			ms->reachability_time = now + 5;
+			if (ms->moveflags & MFL_ONGROUND) { *result = BotTravel_JumpPad(ms, r); return 1; }
+			IG_NotePadFlight(ms->client, r->end);
+			*result = BotFinishTravel_JumpPad(ms, r);
+			return 3;	/* the planner's pad top may still take over (IG_Slingshot) */
+		}
+		if (now - igpd.t0 > 6) {
+			botimport.Print(PRT_MESSAGE, "igpaddrill reach %d fail padtop %d at %.0f %.0f %.0f\n", igpd.reach, igpd.padtop, ms->origin[0], ms->origin[1], ms->origin[2]);
+			igpd.phase = 3; igpd.t0 = now;
+			return 1;
+		}
+		return 2;
+	case 3:		/* pause */
+		if (now - igpd.t0 < 0.3f) return 1;
+		igpd.phase = 0;
+		return 1;
+	}
+	return 0;
+}
+
 void BotMoveToGoal(bot_moveresult_t *result, int movestate, bot_goal_t *goal, int travelflags)
 {
 	int reachnum, lastreachnum, foundjumppad, ent, resultflags, ontrain = false;
@@ -3770,6 +3856,7 @@ void BotMoveToGoal(bot_moveresult_t *result, int movestate, bot_goal_t *goal, in
 	//because the bot could lose all its goals when stuck to a wall
 	BotResetGrapple(ms);
 	if (IG_HookDetect() && IG_Drill(ms, result)) return; /* IG: IG-37, the climb drill */
+	if (IG_HookDetect()) { int pd = IG_PadDrill(ms, result); if (pd == 1 || pd == 3) return; if (pd == 2) goal = &igpd_goal; } /* IG: IG-43, the pad drill */
 	//
 	if (!goal)
 	{

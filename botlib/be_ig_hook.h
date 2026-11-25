@@ -25,6 +25,8 @@ int IG_ClimbFireNow(const vec3_t origin, const vec3_t viewoffset, const vec3_t v
 int IG_ClimbLetGo(const vec3_t origin, const struct aas_reachability_s *reach);
 void IG_NotePadFlight(int client, const vec3_t end);
 int IG_PadFlight(int client, vec3_t end);
+void IG_PadReachAtLoad(void);	/* IG-43 */
+int IG_PadReachList(int *out, int max);
 void IG_GrappleBlocked(int reachnum);
 void IG_GrappleAim(const vec3_t eye, const vec3_t anchor, float lift, int passent, vec3_t viewdir);
 void IG_GrappleWatchdog(int client);
