@@ -99,6 +99,7 @@ typedef struct {
 	int			slinghop;					/* slingshots are flown with Billy's finish (ig_planslinghop) */
 	vec3_t		hookpos, hookdir;
 	int			haslook;					/* IGX_LookAhead found a point to curve toward */
+	float		turnahead;					/* the route's turn within a hop's reach, degrees */
 	vec3_t		look, lookfrom;
 } igx_t;
 
@@ -166,6 +167,7 @@ void IG_PlanTick(bot_state_t *bs)
  * lift, a climb, a pad, a teleporter: the stock movement takes those, and a
  * simulated run would walk off the gap's edge (brutalo, q2rdm4: upper level
  * time fell 4-7 points while it did). */
+static float IGX_HSpeed(bot_state_t *bs);
 static int IGX_RouteDirS(igx_t *x, const vec3_t org, int area, vec3_t dir, int *special)
 {
 	int tt, rn, tv;
@@ -260,6 +262,33 @@ static void IGX_LookAhead(igx_t *x, const vec3_t org, int area)
 		dist += VectorLength(a);
 		VectorCopy(r.end, o);
 		ar = r.areanum;
+	}
+	/* how sharply the route turns within a hop's reach (Billy, his corners
+	 * recorded 2026-11-25: turns of 50-70 degrees he hops through, curving in
+	 * the air; 85-125 he stops hopping, turns his view on the last hop with the
+	 * side key only, lands and turns on the ground) */
+	x->turnahead = 0;
+	{
+		vec3_t h0, h1, p0;
+		float reach = IGX_HSpeed(x->bs) * 0.6f + 64, along = 0;
+		int m;
+
+		VectorSet(h0, x->bs->cur_ps.velocity[0], x->bs->cur_ps.velocity[1], 0);
+		if (VectorNormalize(h0) > 100) {
+			VectorCopy(org, p0);
+			for (m = 0; m < n; m++) {
+				VectorSubtract(pts[m], p0, h1);
+				h1[2] = 0;
+				if (VectorLength(h1) < 24) continue;
+				along += VectorNormalize(h1);
+				{
+					float t = RAD2DEG(acos(DotProduct(h0, h1) > 1 ? 1 : DotProduct(h0, h1) < -1 ? -1 : DotProduct(h0, h1)));
+					if (t > x->turnahead) x->turnahead = t;
+				}
+				VectorCopy(pts[m], p0);
+				if (along > reach) break;
+			}
+		}
 	}
 	VectorCopy(org, a);
 	a[2] += 18;
@@ -983,6 +1012,7 @@ int IG_Plan(bot_state_t *bs, bot_goal_t *goal, bot_moveresult_t *mr)
 	 * step that landed did not count, and "run" here went flat (262 of 4 maps'
 	 * flat landings had jump down). */
 	if ((!ground || groundhop) && IGX_HSpeed(bs) >= LibVarValue("ig_planairhopspeed", "300") && (opts[pick].kind == PO_RUN || opts[pick].kind == PO_LETGO) &&
+		x.turnahead < LibVarValue("ig_planturnhop", "100") &&		/* a sharp corner within the hop: land and turn (Billy) */
 		LibVarValue("ig_planairhop", "1")) {
 		int want_letgo = opts[pick].kind == PO_LETGO;
 
