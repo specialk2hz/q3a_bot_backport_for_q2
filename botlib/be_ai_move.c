@@ -3805,7 +3805,8 @@ static bot_moveresult_t IG_TravelFastJump(bot_movestate_t *ms, aas_reachability_
 		if (ms->client >= 0 && ms->client < MAX_CLIENTS && inair && LibVarValue("ig_fastjumplog", "0") &&
 			(rn != lastreach[ms->client] || AAS_Time() - lasttime[ms->client] > 3)) {
 			lastreach[ms->client] = rn; lasttime[ms->client] = AAS_Time();
-			botimport.Print(PRT_MESSAGE, "ig: fastjump %d reach %d to area %d speed %.0f at %.0f %.0f %.0f\n", ms->client, rn, reach->areanum, spd, ms->origin[0], ms->origin[1], ms->origin[2]);
+			botimport.Print(PRT_MESSAGE, "ig: fastjump %d reach %d to area %d speed %.0f at %.0f %.0f %.0f from %.0f %.0f %.0f to %.0f %.0f %.0f\n", ms->client, rn, reach->areanum, spd, ms->origin[0], ms->origin[1], ms->origin[2],
+				reach->start[0], reach->start[1], reach->start[2], reach->end[0], reach->end[1], reach->end[2]);
 		}
 	}
 	if (inair) {

@@ -806,6 +806,12 @@ int IG_Plan(bot_state_t *bs, bot_goal_t *goal, bot_moveresult_t *mr)
 	x.goal = goal;
 	VectorCopy(goal->origin, x.goalorg);
 	x.tfl = bs->tfl | IG_FastJumpTfl(bs->client, bs->cur_ps.velocity);	/* IG-47 */
+	/* IG-47: the planner plans with momentum jumps from ig_fastjumpplan u/s
+	 * (default: only when the route has them), so it builds the speed toward
+	 * one coming up; its simulation proves the jump or rules it out */
+	if (LibVarValue("ig_fastjumps", "0") && LibVarValue("ig_fastjumpplan", "0") > 0 &&
+		sqrt(bs->cur_ps.velocity[0] * bs->cur_ps.velocity[0] + bs->cur_ps.velocity[1] * bs->cur_ps.velocity[1]) >= LibVarValue("ig_fastjumpplan", "0"))
+		x.tfl |= TFL_STRAFEJUMP;
 	if (trap_Cvar_VariableIntegerValue("ig_plandebug") == 2) {
 		vec3_t o2; int a2;
 		VectorCopy(bs->cur_ps.origin, o2); a2 = AAS_PointAreaNum(o2);
