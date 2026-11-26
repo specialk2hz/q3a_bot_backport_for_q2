@@ -2075,7 +2075,7 @@ int AAS_NextModelReachability(int num, int modelnum)
 // Returns:				-
 // Changes Globals:		-
 //===========================================================================
-static void AAS_MarkReachableAreas(int areanum, int travelflags, byte *reached, int *queue)
+void AAS_MarkReachableAreas(int areanum, int travelflags, byte *reached, int *queue)	// IG: not static, IG-44 uses it
 {
 	int i, head, tail, badtravelflags;
 	aas_areasettings_t *settings;
@@ -2110,6 +2110,7 @@ static void AAS_MarkReachableAreas(int areanum, int travelflags, byte *reached, 
 // Returns:				-
 // Changes Globals:		-
 //===========================================================================
+int IG_RandomGoalArea(int areanum, int travelflags, int *goalareanum, vec3_t goalorigin);	// IG: be_ig_roamgoal.c
 int AAS_RandomGoalArea(int areanum, int travelflags, int *goalareanum, vec3_t goalorigin)
 {
 	int i, n, t, found, *queue;
@@ -2117,6 +2118,7 @@ int AAS_RandomGoalArea(int areanum, int travelflags, int *goalareanum, vec3_t go
 	vec3_t start, end;
 	aas_trace_t trace;
 
+	if (LibVarValue("ig_roamgoal", "0")) return IG_RandomGoalArea(areanum, travelflags, goalareanum, goalorigin);	// IG: IG-44
 	//if the area has no reachabilities
 	if (!AAS_AreaReachability(areanum)) return false;
 	//Q2: a travel time to an area routes its whole cluster, which on a Quake II
