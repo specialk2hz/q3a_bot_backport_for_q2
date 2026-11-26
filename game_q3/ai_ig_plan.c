@@ -251,13 +251,13 @@ static void IGX_LookAhead(igx_t *x, const vec3_t org, int area)
 	if (!LibVarValue("ig_planlook", "1") || !ar) return;
 	VectorCopy(org, o);
 	for (k = 0; k < 8 && n < 15 && dist < maxd; k++) {
-		if (ar == x->goalarea) { VectorCopy(x->goalorg, pts[n++]); break; }
+		if (ar == x->goalarea) { VectorCopy(x->goalorg, pts[n]); n++; break; }
 		if (!AAS_AreaRouteToGoalArea(ar, o, x->goalarea, x->tfl, &tt, &rn) || !rn) break;
 		AAS_ReachabilityFromNum(rn, &r);
 		tv = r.traveltype & TRAVELTYPE_MASK;
 		if (tv != TRAVEL_WALK) break;
-		VectorCopy(r.start, pts[n++]);
-		VectorCopy(r.end, pts[n++]);
+		VectorCopy(r.start, pts[n]); n++;
+		VectorCopy(r.end, pts[n]); n++;
 		VectorSubtract(r.end, o, a);
 		dist += VectorLength(a);
 		VectorCopy(r.end, o);
