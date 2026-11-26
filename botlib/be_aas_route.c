@@ -49,6 +49,7 @@ Foundation, Inc., 51 Franklin St, Fifth Floor, Boston, MA  02110-1301  USA
 
 //travel time in hundreths of a second = distance * 100 / speed
 void IG_RouteMomentum(void);	// IG: be_ig_route.c, IG-46
+unsigned short int IG_StartLeg(int areanum, vec3_t origin, vec3_t end);	// IG: be_ig_route.c, IG-46
 #define DISTANCEFACTOR_CROUCH		1.3f		//crouch speed = 100
 #define DISTANCEFACTOR_SWIM			1		//should be 0.66, swim speed = 150
 #define DISTANCEFACTOR_WALK			0.33f	//walk speed = 300
@@ -1750,7 +1751,7 @@ int AAS_AreaRouteToGoalArea(int areanum, vec3_t origin, int goalareanum, int tra
 			}
 			reach = &aasworld.reachability[*reachnum];
 			*traveltime = areacache->traveltimes[clusterareanum] +
-							AAS_AreaTravelTime(areanum, origin, reach->start);
+							IG_StartLeg(areanum, origin, reach->start);	// IG: IG-46
 			//
 			return true;
 		} //end if
@@ -1811,7 +1812,7 @@ int AAS_AreaRouteToGoalArea(int areanum, vec3_t origin, int goalareanum, int tra
 			*reachnum = aasworld.areasettings[areanum].firstreachablearea +
 							areacache->reachabilities[clusterareanum];
 			reach = aasworld.reachability + *reachnum;
-			t += AAS_AreaTravelTime(areanum, origin, reach->start);
+			t += IG_StartLeg(areanum, origin, reach->start);	// IG: IG-46
 		} //end if
 		//if the time is better than the one already found
 		if (!besttime || t < besttime)
@@ -1914,7 +1915,7 @@ int AAS_PredictRoute(struct aas_predictroute_s *route, int areanum, vec3_t origi
 				route->endcontents = aasworld.areasettings[reach->areanum].contents;
 				route->endtravelflags = AAS_AreaContentsTravelFlags_inline(reach->areanum);
 				VectorCopy(reach->end, route->endpos);
-				route->time += AAS_AreaTravelTime(areanum, origin, reach->start);
+				route->time += IG_StartLeg(areanum, origin, reach->start);	// IG: IG-46
 				route->time += reach->traveltime;
 				return true;
 			} //end if
@@ -1934,7 +1935,7 @@ int AAS_PredictRoute(struct aas_predictroute_s *route, int areanum, vec3_t origi
 					route->endarea = testareanum;
 					route->endcontents = aasworld.areasettings[testareanum].contents;
 					VectorCopy(reach->end, route->endpos);
-					route->time += AAS_AreaTravelTime(areanum, origin, reach->start);
+					route->time += IG_StartLeg(areanum, origin, reach->start);	// IG: IG-46
 					route->time += reach->traveltime;
 					return true;
 				} //end if
@@ -1952,7 +1953,7 @@ int AAS_PredictRoute(struct aas_predictroute_s *route, int areanum, vec3_t origi
 			} //end if
 		} //end for
 
-		route->time += AAS_AreaTravelTime(areanum, origin, reach->start);
+		route->time += IG_StartLeg(areanum, origin, reach->start);	// IG: IG-46
 		route->time += reach->traveltime;
 		route->endarea = reach->areanum;
 		route->endcontents = aasworld.areasettings[reach->areanum].contents;

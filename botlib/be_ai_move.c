@@ -3882,7 +3882,11 @@ static int IG_PadDrill(bot_movestate_t *ms, bot_moveresult_t *result)
 							}
 						}
 					}
-					else botimport.Print(PRT_MESSAGE, "igpaddrill predict direct %d\n", td);
+					else {
+						void IG_RouteDebugPath(const char *tag, vec3_t org, int goal);
+						botimport.Print(PRT_MESSAGE, "igpaddrill predict direct %d\n", td);
+						if (sa) IG_RouteDebugPath("natural", sp, igpd_goal.areanum);
+					}
 				}
 				return 1;
 			case 1:

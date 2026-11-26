@@ -44,6 +44,20 @@ static float IGR_Angle(const vec3_t a, const vec3_t b)
 	return acos(c) * 180 / M_PI;
 }
 
+/* The walk from where a bot stands to its first route point, at the same
+ * hop-speed price as a straight crossing (1 with ig_routemomentum off).
+ * Without it a bot standing in an area is priced at walking speed while
+ * one arriving from next door gets the discounted crossing, so the
+ * neighbour looks nearer the goal and the planner hops back and forth
+ * (the pad drill: 0 of 75 tries left the start). */
+static float igr_startmul = 1;
+
+unsigned short int IG_StartLeg(int areanum, vec3_t origin, vec3_t end)
+{
+	unsigned short int t = AAS_AreaTravelTime(areanum, origin, end);
+	return igr_startmul < 1 ? (unsigned short int) (t * igr_startmul + 0.5f) : t;
+}
+
 void IG_RouteMomentum(void)
 {
 	int i, l, n, changed = 0, total = 0;
@@ -52,8 +66,10 @@ void IG_RouteMomentum(void)
 	aas_reversedlink_t *revlink;
 	aas_areasettings_t *settings;
 
+	igr_startmul = 1;
 	if (!LibVarValue("ig_routemomentum", "0") || !aasworld.areatraveltimes) return;
 	fast = LibVarValue("ig_routefast", "0.6");
+	igr_startmul = fast;
 	straight = LibVarValue("ig_routestraight", "20");
 	turn = LibVarValue("ig_routeturn", "70");
 	if (turn <= straight) turn = straight + 1;
