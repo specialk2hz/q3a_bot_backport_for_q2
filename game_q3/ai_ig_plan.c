@@ -1755,7 +1755,7 @@ int IG_PlanPadView(bot_state_t *bs)
 	return 1;
 }
 
-/* Air control in a pad's flight (libvar ig_planpadair, default 1, with the
+/* Air control in a pad's flight (libvar ig_planpadair, default 0 since Billy's A/B, with the
  * planner). The stock pad steering (BotAirControl) pushes at full strength
  * at the landing it predicts without the push itself, so it overcorrects: on
  * q2rdm11's twin pads bots drifted past the landing into the side wall and
@@ -1770,9 +1770,11 @@ int IG_PlanPadAir(bot_state_t *bs)
 	float bestd = 1e9f, fm, sm, yaw = bs->viewangles[YAW];
 	igpm_t pm;
 
-	if (!IG_PlanOn() || c < 0 || c >= MAX_CLIENTS || !LibVarValue("ig_planpadair", "1")) return 0;
+	if (!IG_PlanOn() || c < 0 || c >= MAX_CLIENTS) return 0;
 	if (bs->cur_ps.groundEntityNum != ENTITYNUM_NONE || igp_state[c].hookout) return 0;
 	if (!IG_PadFlight(c, end)) return 0;
+	if (LibVarValue("ig_viewdebug", "0")) BotAI_Print(PRT_MESSAGE, "igpadend %d end %.0f %.0f %.0f\n", c, end[0], end[1], end[2]);
+	if (!LibVarValue("ig_planpadair", "0")) return 0;
 	for (k = -1; k < 16; k++) {
 		float dist;
 
