@@ -89,6 +89,13 @@ static int IGJ_Fly(vec3_t e, vec3_t d, float speed, int want, vec3_t land, float
 	return 0;
 }
 
+static void IGJ_Rej(int debug, const char *why, vec3_t e, int k)
+{
+	float wx = LibVarValue("ig_gapjumpwatchx", "0"), wy = LibVarValue("ig_gapjumpwatchy", "0");
+	if (debug >= 2 && fabs(e[0] - wx) < 96 && fabs(e[1] - wy) < 96)
+		botimport.Print(PRT_MESSAGE, "ig: gapjump reject %s at %.0f %.0f %.0f dir %d\n", why, e[0], e[1], e[2], k);
+}
+
 void IG_GapJumpsAtLoad(void)
 {
 	static igjump_t found[IG_GJ_MAX];
@@ -100,8 +107,13 @@ void IG_GapJumpsAtLoad(void)
 	if (!LibVarValue("ig_gapjumps", "0")) return;
 	for (a = 1; a < aasworld.numareas && nfound < IG_GJ_MAX; a++) {
 		aas_area_t *ar = &aasworld.areas[a];
+		vec3_t mid0;
 		vec3_t o;
 
+		VectorSet(o, ar->center[0], ar->center[1], ar->mins[2] + 1);
+		if (debug >= 3 && ar->mins[0] < LibVarValue("ig_gapjumpwatchx", "0") + 200 && ar->maxs[0] > LibVarValue("ig_gapjumpwatchx", "0") - 200 && ar->mins[1] < LibVarValue("ig_gapjumpwatchy", "0") && ar->maxs[1] > LibVarValue("ig_gapjumpwatchy", "0") && ar->maxs[2] > 300 && ar->mins[2] < 400)
+			botimport.Print(PRT_MESSAGE, "ig: gapjump near area %d centre %.0f %.0f %.0f mins %.0f %.0f maxs %.0f %.0f grounded %d crouch %d contents %d inarea %d ground %d\n", a, o[0], o[1], o[2],
+				ar->mins[0], ar->mins[1], ar->maxs[0], ar->maxs[1], AAS_AreaGrounded(a), AAS_AreaCrouch(a), aasworld.areasettings[a].contents, AAS_PointAreaNum(o), IGJ_Ground(o, 32, mid0));
 		if (!AAS_AreaGrounded(a) || AAS_AreaSwim(a) || AAS_AreaCrouch(a)) continue;
 		if (aasworld.areasettings[a].contents & (AREACONTENTS_LAVA | AREACONTENTS_SLIME | AREACONTENTS_JUMPPAD | AREACONTENTS_TELEPORTER)) continue;
 		VectorSet(o, ar->center[0], ar->center[1], ar->mins[2] + 1);
@@ -124,7 +136,7 @@ void IG_GapJumpsAtLoad(void)
 			if (!ok) continue;
 			VectorCopy(q, e);
 			ta = AAS_PointAreaNum(e);
-			if (!ta || !AAS_AreaGrounded(ta)) continue;
+			if (!ta || !AAS_AreaGrounded(ta)) { IGJ_Rej(debug, "edge area", e, k); continue; }
 			/* the far side: floor at the same height */
 			la = 0;
 			for (gap = 40; gap <= maxgap; gap += 8) {
@@ -136,24 +148,27 @@ void IG_GapJumpsAtLoad(void)
 					break;
 				}
 			}
-			if (!la || la == ta || !AAS_AreaGrounded(la)) continue;
+			if (!la || la == ta || !AAS_AreaGrounded(la)) { IGJ_Rej(debug, la ? "far area" : "no far floor", e, k); continue; }
 			if (aasworld.areasettings[la].contents & (AREACONTENTS_LAVA | AREACONTENTS_SLIME | AREACONTENTS_JUMPPAD | AREACONTENTS_TELEPORTER)) continue;
-			if (IGJ_HasRoute(ta, la)) continue;
+			if (IGJ_HasRoute(ta, la)) {
+				IGJ_Rej(debug, "has route", e, k);
+				continue;
+			}
 			{
 				int c1 = aasworld.areasettings[ta].cluster, c2 = aasworld.areasettings[la].cluster;
-				if (!(c1 == c2 || c1 < 0 || c2 < 0)) continue;
+				if (!(c1 == c2 || c1 < 0 || c2 < 0)) { IGJ_Rej(debug, "clusters", e, k); continue; }
 			}
 			/* what is under the gap: a floor, not lava, slime or nothing */
 			VectorMA(e, gap * 0.5f, d, mid);
 			VectorCopy(mid, below); below[2] -= 4000;
 			tr = AAS_TraceClientBBox(mid, below, PRESENCE_NORMAL, -1);
-			if (tr.fraction >= 1) continue;
+			if (tr.fraction >= 1) { IGJ_Rej(debug, "void", e, k); continue; }
 			if (AAS_PointContents(tr.endpos) & (CONTENTS_LAVA | CONTENTS_SLIME)) continue;
 			{
 				vec3_t b2; VectorCopy(tr.endpos, b2); b2[2] -= 8;
 				if (AAS_PointContents(b2) & (CONTENTS_LAVA | CONTENTS_SLIME)) continue;
 			}
-			if (!IGJ_Fly(e, d, speed, la, land, &t)) continue;
+			if (!IGJ_Fly(e, d, speed, la, land, &t)) { IGJ_Rej(debug, "flight", e, k); continue; }
 			/* one per pair of areas: the narrowest gap */
 			for (i = 0; i < nfound; i++)
 				if (found[i].from == ta && found[i].r.areanum == la) break;
@@ -168,6 +183,42 @@ void IG_GapJumpsAtLoad(void)
 			found[i].r.traveltype = TRAVEL_JUMP;
 			found[i].r.traveltime = (unsigned short) (100 * (t + price));
 		}
+	}
+	/* bspc's own jumps over gaps: priced as a long detour (q2rdm11's walkway gap
+	 * 7.3 s, so the route drops into the pit and takes the teleporter back up).
+	 * A jump whose flight lands where it says, over a floor that is not lava,
+	 * slime or nothing, costs its flight and the take-off price
+	 * (ig_gapjumpreprice, default 1 with ig_gapjumps). */
+	if (LibVarValue("ig_gapjumpreprice", "1")) {
+		int r, repriced = 0;
+		for (r = 1; r < aasworld.reachabilitysize; r++) {
+			aas_reachability_t *rr = &aasworld.reachability[r];
+			vec3_t d, land, mid, below;
+			float t, dist, sp;
+			aas_trace_t tr;
+			unsigned short nt;
+
+			if ((rr->traveltype & TRAVELTYPE_MASK) != TRAVEL_JUMP) continue;
+			VectorSubtract(rr->end, rr->start, d); d[2] = 0;
+			dist = VectorNormalize(d);
+			if (dist < 32 || fabs(rr->end[2] - rr->start[2]) > 48) continue;
+			VectorMA(rr->start, dist * 0.5f, d, mid); mid[2] = rr->start[2];
+			VectorCopy(mid, below); below[2] -= 4000;
+			tr = AAS_TraceClientBBox(mid, below, PRESENCE_NORMAL, -1);
+			if (tr.fraction >= 1) continue;
+			if (AAS_PointContents(tr.endpos) & (CONTENTS_LAVA | CONTENTS_SLIME)) continue;
+			VectorCopy(tr.endpos, below); below[2] -= 8;
+			if (AAS_PointContents(below) & (CONTENTS_LAVA | CONTENTS_SLIME)) continue;
+			for (sp = speed; sp <= speed + 100; sp += 50)
+				if (IGJ_Fly(rr->start, d, sp, rr->areanum, land, &t)) break;
+			if (sp > speed + 100) continue;
+			nt = (unsigned short) (100 * (t + price) + 0.5f);
+			if (nt >= rr->traveltime) continue;
+			if (debug) botimport.Print(PRT_MESSAGE, "ig: gapjump reprice reach %d -> area %d gap %.0f time %d -> %d from %.0f %.0f %.0f\n", r, rr->areanum, dist, rr->traveltime, nt, rr->start[0], rr->start[1], rr->start[2]);
+			rr->traveltime = nt;
+			repriced++;
+		}
+		botimport.Print(PRT_MESSAGE, "ig: %d jumps repriced\n", repriced);
 	}
 	/* per take-off area: its block of routes moved to the end with the new ones */
 	for (i = 0; i < nfound; i++) {
