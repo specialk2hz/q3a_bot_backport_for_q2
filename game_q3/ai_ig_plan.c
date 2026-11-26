@@ -565,7 +565,7 @@ static void IGX_Simulate(igx_t *x, igopt_t *o)
 		if (pm.everhit & (CONTENTS_LAVA | CONTENTS_SLIME)) return;	/* out */
 		VectorSet(vh, pm.vel[0], pm.vel[1], 0);
 		after = VectorLength(vh);
-		if (pm.blocked && before - after > 200) { wallpen += 0.15f * (before - after) / 300 * LibVarValue("ig_planwallmul", "1"); if (t < LibVarValue("ig_planwallsoon", "4")) o->wallhit = 1; }
+		if (pm.blocked && before - after > 200) { wallpen += 0.15f * (before - after) / 300 * LibVarValue("ig_planwallmul", "1") * (x->released ? LibVarValue("ig_planreleasewallmul", "3") : 1); if (t < LibVarValue("ig_planwallsoon", "4")) o->wallhit = 1; }
 		flow += after;
 		flown++;
 		if (pm.pad || pm.teleport) break;	/* the navigation file knows where those go */
@@ -600,7 +600,7 @@ static void IGX_Simulate(igx_t *x, igopt_t *o)
 			if (pm.everhit & (CONTENTS_LAVA | CONTENTS_SLIME)) return;
 			VectorSet(vh, pm.vel[0], pm.vel[1], 0);
 			after = VectorLength(vh);
-			if (pm.blocked && before - after > 200) { wallpen += 0.15f * (before - after) / 300 * LibVarValue("ig_planwallmul", "1"); }
+			if (pm.blocked && before - after > 200) { wallpen += 0.15f * (before - after) / 300 * LibVarValue("ig_planwallmul", "1") * (x->released ? LibVarValue("ig_planreleasewallmul", "3") : 1); }
 			if (pm.pad || pm.teleport) break;
 		}
 	}
