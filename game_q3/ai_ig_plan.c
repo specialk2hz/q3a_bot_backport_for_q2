@@ -162,6 +162,8 @@ void IG_PlanTick(bot_state_t *bs)
 
 /* ---------------------------------------------------------------- route */
 
+int IG_FastJumpTfl(int client, const vec3_t vel);	/* be_ig_jump.c, IG-47 */
+
 /* The route's way from org. *special: the route's next step there is one
  * the simulation does not model -- a gap jump, a barrier jump, a ladder, a
  * lift, a climb, a pad, a teleporter: the stock movement takes those, and a
@@ -195,10 +197,14 @@ static int IGX_RouteDirS(igx_t *x, const vec3_t org, int area, vec3_t dir, int *
 		if (!AAS_AreaRouteToGoalArea(area, o, x->goalarea, x->tfl, &tt, &rn) || !rn) return 0;
 		AAS_ReachabilityFromNum(rn, &r);
 		tv = r.traveltype & TRAVELTYPE_MASK;
-		if (special && tv != TRAVEL_WALK && tv != TRAVEL_WALKOFFLEDGE) *special = 1;
+		if (special && tv != TRAVEL_WALK && tv != TRAVEL_WALKOFFLEDGE && tv != TRAVEL_STRAFEJUMP) *special = 1;	/* IG-47: momentum jumps are flown by the sim */
 		VectorCopy(r.start, t);
-		/* at the reachability's start already: head across it */
-		if ((r.start[0] - o[0]) * (r.start[0] - o[0]) + (r.start[1] - o[1]) * (r.start[1] - o[1]) < 40 * 40)
+		/* at the reachability's start already: head across it. A momentum jump
+		 * (IG-47) heads for its landing at once: the sim flies it from wherever
+		 * the run reaches the edge, and steering at the take-off first ran
+		 * q2rdm11's walkway-end bots into the pillar beside the gap */
+		if (tv == TRAVEL_STRAFEJUMP ||
+			(r.start[0] - o[0]) * (r.start[0] - o[0]) + (r.start[1] - o[1]) * (r.start[1] - o[1]) < 40 * 40)
 			VectorCopy(r.end, t);
 	}
 	VectorSubtract(t, o, dir);
@@ -242,8 +248,8 @@ static int IGX_LineClear(bot_state_t *bs, const vec3_t a, const vec3_t b)
 
 static void IGX_LookAhead(igx_t *x, const vec3_t org, int area)
 {
-	vec3_t pts[16], o, a, b;
-	int n = 0, k, tt, rn, ar = area, tv;
+	vec3_t pts[16], o, a, b, jumpfrom;
+	int n = 0, k, tt, rn, ar = area, tv, jumpland = -1;
 	aas_reachability_t r;
 	float dist = 0, maxd = LibVarValue("ig_planlookdist", "500");
 
@@ -255,6 +261,7 @@ static void IGX_LookAhead(igx_t *x, const vec3_t org, int area)
 		if (!AAS_AreaRouteToGoalArea(ar, o, x->goalarea, x->tfl, &tt, &rn) || !rn) break;
 		AAS_ReachabilityFromNum(rn, &r);
 		tv = r.traveltype & TRAVELTYPE_MASK;
+		if (tv == TRAVEL_STRAFEJUMP) { VectorCopy(r.start, jumpfrom); VectorCopy(r.end, pts[n]); n++; jumpland = n - 1; break; }	/* IG-47: curve toward a momentum jump's landing */
 		if (tv != TRAVEL_WALK) break;
 		VectorCopy(r.start, pts[n]); n++;
 		VectorCopy(r.end, pts[n]); n++;
@@ -292,12 +299,22 @@ static void IGX_LookAhead(igx_t *x, const vec3_t org, int area)
 	}
 	VectorCopy(org, a);
 	a[2] += 18;
+	if (trap_Cvar_VariableIntegerValue("ig_plandebug") == 2 && jumpland >= 0) {
+		vec3_t bb; VectorCopy(jumpfrom, bb); bb[2] += 18;
+		BotAI_Print(PRT_MESSAGE, "iglook %d n %d jumpland %d at %.0f %.0f %.0f dist %.0f clear %d\n", x->bs->client, n, jumpland, pts[jumpland][0], pts[jumpland][1], pts[jumpland][2],
+			sqrt((pts[jumpland][0] - org[0]) * (pts[jumpland][0] - org[0]) + (pts[jumpland][1] - org[1]) * (pts[jumpland][1] - org[1])), IGX_LineClear(x->bs, a, bb));
+	}
 	for (k = n - 1; k >= 1; k--) {		/* the farthest in a straight line (one step ahead needs no look-ahead) */
 		VectorSubtract(pts[k], org, b);
 		b[2] = 0;
-		if (VectorLength(b) > maxd + 64 || VectorLength(b) < 96) continue;
+		/* a momentum jump's landing from up to ig_planlookjump (1200): lined up
+		 * from the start of the run, not 500 units out (q2rdm11's walkway end) */
+		if (VectorLength(b) > (k == jumpland ? LibVarValue("ig_planlookjump", "1200") : maxd + 64) || VectorLength(b) < 96) continue;
 		VectorCopy(pts[k], b);
 		b[2] += 18;
+		/* a jump landing: the flight from the take-off was proven at map load,
+		 * so only the run to the take-off needs a clear line */
+		if (k == jumpland) { VectorCopy(jumpfrom, b); b[2] += 18; }
 		if (!IGX_LineClear(x->bs, a, b)) continue;
 		VectorCopy(pts[k], x->look);
 		VectorCopy(org, x->lookfrom);
@@ -788,7 +805,13 @@ int IG_Plan(bot_state_t *bs, bot_goal_t *goal, bot_moveresult_t *mr)
 	x.goalarea = goal->areanum;
 	x.goal = goal;
 	VectorCopy(goal->origin, x.goalorg);
-	x.tfl = bs->tfl;
+	x.tfl = bs->tfl | IG_FastJumpTfl(bs->client, bs->cur_ps.velocity);	/* IG-47 */
+	if (trap_Cvar_VariableIntegerValue("ig_plandebug") == 2) {
+		vec3_t o2; int a2;
+		VectorCopy(bs->cur_ps.origin, o2); a2 = AAS_PointAreaNum(o2);
+		BotAI_Print(PRT_MESSAGE, "igfj %d tfl %x fast %d area %d goal %d tt %d ttfast %d v %.0f\n", bs->client, x.tfl, (x.tfl & TFL_STRAFEJUMP) != 0, a2, x.goalarea,
+			a2 ? AAS_AreaTravelTimeToGoalArea(a2, o2, x.goalarea, bs->tfl) : -1, a2 ? AAS_AreaTravelTimeToGoalArea(a2, o2, x.goalarea, bs->tfl | TFL_STRAFEJUMP) : -1, VectorLength(bs->cur_ps.velocity));
+	}
 	x.jumpland = trap_Cvar_VariableIntegerValue("ig_jumpland");
 	x.canfire = IG_CanFireHook(c);
 	x.flow = LibVarValue("ig_planflow", "0.2");

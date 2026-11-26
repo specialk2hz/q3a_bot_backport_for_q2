@@ -128,7 +128,7 @@ void IG_RouteDebugPath(const char *tag, vec3_t org, int goal)
 		aas_reachability_t *out;
 		vec3_t din, seg, dout;
 		float a1 = -1, a2;
-		if (!AAS_AreaRouteToGoalArea(a, o, goal, TFL_DEFAULT | TFL_GRAPPLEHOOK, &tt, &rn) || !rn) break;
+		if (!AAS_AreaRouteToGoalArea(a, o, goal, TFL_DEFAULT | TFL_GRAPPLEHOOK | (LibVarValue("ig_routedebugfast", "0") ? TFL_STRAFEJUMP : 0), &tt, &rn) || !rn) break;
 		out = &aasworld.reachability[rn];
 		if ((out->traveltype & TRAVELTYPE_MASK) == TRAVEL_WALK) VectorSubtract(aasworld.areas[out->areanum].center, out->start, dout);
 		else VectorSubtract(out->end, out->start, dout);

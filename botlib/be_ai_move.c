@@ -3784,6 +3784,51 @@ void IG_PadDrillNoteIn(int client)
 	if (igpd.client == client) igpd.padin = 1;
 }
 
+int IG_FastJumpTfl(int client, const vec3_t vel);	// IG: be_ig_jump.c, IG-47
+/* IG-47: a momentum jump (TRAVEL_STRAFEJUMP). The stock running jump backs a
+ * bot up for a run-up; this keeps its speed: run along the jump's line (to its
+ * start first when well off it) and hop where the floor ahead ends. */
+static bot_moveresult_t IG_TravelFastJump(bot_movestate_t *ms, aas_reachability_t *reach, int inair)
+{
+	bot_moveresult_t result;
+	vec3_t dir, tostart, ahead, down, mv;
+	float spd, along;
+	aas_trace_t tr;
+
+	BotClearMoveResult(&result);
+	VectorSubtract(reach->end, reach->start, dir); dir[2] = 0;
+	if (VectorNormalize(dir) < 1) VectorSet(dir, 1, 0, 0);
+	spd = sqrt(ms->velocity[0] * ms->velocity[0] + ms->velocity[1] * ms->velocity[1]);
+	{	/* the log: each momentum jump a bot starts (ig_fastjumplog) */
+		static int lastreach[MAX_CLIENTS]; static float lasttime[MAX_CLIENTS];
+		int rn = ms->lastreachnum;
+		if (ms->client >= 0 && ms->client < MAX_CLIENTS && inair && LibVarValue("ig_fastjumplog", "0") &&
+			(rn != lastreach[ms->client] || AAS_Time() - lasttime[ms->client] > 3)) {
+			lastreach[ms->client] = rn; lasttime[ms->client] = AAS_Time();
+			botimport.Print(PRT_MESSAGE, "ig: fastjump %d reach %d to area %d speed %.0f at %.0f %.0f %.0f\n", ms->client, rn, reach->areanum, spd, ms->origin[0], ms->origin[1], ms->origin[2]);
+		}
+	}
+	if (inair) {
+		VectorSubtract(reach->end, ms->origin, mv); mv[2] = 0;
+		if (VectorNormalize(mv) < 1) VectorCopy(dir, mv);
+		EA_Move(ms->client, mv, 400);
+		VectorCopy(mv, result.movedir);
+		return result;
+	}
+	VectorSubtract(reach->start, ms->origin, tostart); tostart[2] = 0;
+	along = DotProduct(tostart, dir);
+	VectorMA(tostart, -along, dir, mv);			/* off the line */
+	if (VectorLength(mv) > 48 && along > 0) { VectorCopy(tostart, mv); VectorNormalize(mv); }
+	else VectorCopy(dir, mv);
+	EA_Move(ms->client, mv, 400);
+	/* the floor a frame and a half ahead: none there, jump now */
+	VectorMA(ms->origin, spd * 0.15f + 16, mv, ahead);
+	VectorCopy(ahead, down); down[2] -= 48;
+	tr = AAS_TraceClientBBox(ahead, down, PRESENCE_NORMAL, ms->entitynum);
+	if (tr.fraction >= 1 && !tr.startsolid) EA_Jump(ms->client);
+	VectorCopy(mv, result.movedir);
+	return result;
+}
 static int IG_PadDrill(bot_movestate_t *ms, bot_moveresult_t *result)
 {
 	int list[64], n;
@@ -4036,6 +4081,7 @@ void BotMoveToGoal(bot_moveresult_t *result, int movestate, bot_goal_t *goal, in
 	//
 	ms = BotMoveStateFromHandle(movestate);
 	if (!ms) return;
+	travelflags |= IG_FastJumpTfl(ms->client, ms->velocity);	// IG: IG-47, momentum jumps when fast
 	//reset the grapple before testing if the bot has a valid goal
 	//because the bot could lose all its goals when stuck to a wall
 	BotResetGrapple(ms);
@@ -4372,6 +4418,7 @@ void BotMoveToGoal(bot_moveresult_t *result, int movestate, bot_goal_t *goal, in
 				case TRAVEL_LADDER: *result = BotTravel_Ladder(ms, &reach); break;
 				case TRAVEL_WALKOFFLEDGE: *result = BotTravel_WalkOffLedge(ms, &reach); break;
 				case TRAVEL_JUMP: *result = BotTravel_Jump(ms, &reach); break;
+				case TRAVEL_STRAFEJUMP: *result = IG_TravelFastJump(ms, &reach, 0); break;	// IG: IG-47, keep the speed, hop at the edge
 				case TRAVEL_SWIM: *result = BotTravel_Swim(ms, &reach); break;
 				case TRAVEL_WATERJUMP: *result = BotTravel_WaterJump(ms, &reach); break;
 				case TRAVEL_TELEPORT: *result = BotTravel_Teleport(ms, &reach); break;
@@ -4481,6 +4528,7 @@ void BotMoveToGoal(bot_moveresult_t *result, int movestate, bot_goal_t *goal, in
 				case TRAVEL_LADDER: *result = BotTravel_Ladder(ms, &reach); break;
 				case TRAVEL_WALKOFFLEDGE: *result = BotFinishTravel_WalkOffLedge(ms, &reach); break;
 				case TRAVEL_JUMP: *result = BotFinishTravel_Jump(ms, &reach); break;
+				case TRAVEL_STRAFEJUMP: *result = IG_TravelFastJump(ms, &reach, 1); break;	// IG: IG-47, steer to the landing
 				case TRAVEL_SWIM: *result = BotTravel_Swim(ms, &reach); break;
 				case TRAVEL_WATERJUMP: *result = BotFinishTravel_WaterJump(ms, &reach); break;
 				case TRAVEL_TELEPORT: /*do nothing*/ break;

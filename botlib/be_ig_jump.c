@@ -37,7 +37,24 @@ of the License, or (at your option) any later version.
 #define IG_GJ_DIRS 16
 #define IG_GJ_MAX  4096
 
-typedef struct { int from; aas_reachability_t r; float gap; } igjump_t;
+typedef struct { int from; aas_reachability_t r; float gap, need; } igjump_t;
+
+/* IG-47: a bot may take momentum jumps (TRAVEL_STRAFEJUMP) from ig_fastjumpon
+ * (500) u/s and keeps the flag until it slows under ig_fastjumpoff (380), so
+ * its route does not flicker between the jump and the long way round. */
+static int igfj_on[MAX_CLIENTS];
+static float igfj_onspd = 500, igfj_offspd = 380;
+static int igfj_enabled;
+
+int IG_FastJumpTfl(int client, const vec3_t vel)
+{
+	float s;
+	if (!igfj_enabled || client < 0 || client >= MAX_CLIENTS) return 0;
+	s = sqrt(vel[0] * vel[0] + vel[1] * vel[1]);
+	if (s >= igfj_onspd) igfj_on[client] = 1;
+	else if (s < igfj_offspd) igfj_on[client] = 0;
+	return igfj_on[client] ? TFL_STRAFEJUMP : 0;
+}
 
 static int IGJ_Ground(vec3_t p, float down, vec3_t floor)
 {
@@ -91,7 +108,7 @@ static int IGJ_Fly(vec3_t e, vec3_t d, float speed, int want, vec3_t land, float
 
 static void IGJ_Rej(int debug, const char *why, vec3_t e, int k)
 {
-	float wx = LibVarValue("ig_gapjumpwatchx", "0"), wy = LibVarValue("ig_gapjumpwatchy", "0");
+	float wx = atof(LibVarString("ig_gapjumpwatchx", "0")), wy = atof(LibVarString("ig_gapjumpwatchy", "0"));
 	if (debug >= 2 && fabs(e[0] - wx) < 96 && fabs(e[1] - wy) < 96)
 		botimport.Print(PRT_MESSAGE, "ig: gapjump reject %s at %.0f %.0f %.0f dir %d\n", why, e[0], e[1], e[2], k);
 }
@@ -103,24 +120,55 @@ void IG_GapJumpsAtLoad(void)
 	float speed = LibVarValue("ig_gapjumpspeed", "300"), maxgap = LibVarValue("ig_gapjumpmax", "260");
 	float price = LibVarValue("ig_gapjumpprice", "0.3");
 	int debug = (int) LibVarValue("ig_gapjumpdebug", "0");
+	/* IG-47: momentum jumps -- longer gaps and drops a run cannot make, at speed */
+	int fast = (int) LibVarValue("ig_fastjumps", "0"), nfast = 0;
+	float fastmax = LibVarValue("ig_fastjumpmax", "420"), fastdrop = LibVarValue("ig_fastjumpdrop", "160");
+	float fastneed = LibVarValue("ig_fastjumpneed", "450"), fastprice = LibVarValue("ig_fastjumpprice", "0.1");
 
-	if (!LibVarValue("ig_gapjumps", "0")) return;
+	igfj_enabled = 0;
+	if (!LibVarValue("ig_gapjumps", "0") && !fast) return;
+	if (debug >= 3) {	/* the areas at points west of the watch point */
+		int q;
+		for (q = 0; q < 6; q++) {
+			vec3_t pt; int pa;
+			VectorSet(pt, atof(LibVarString("ig_gapjumpwatchx", "0")) + 40 - q * 40, atof(LibVarString("ig_gapjumpwatchy", "0")), atof(LibVarString("ig_gapjumpwatchz", "376")));
+			pa = AAS_PointAreaNum(pt);
+			if (pa) botimport.Print(PRT_MESSAGE, "ig: gapjump point %.0f %.0f %.0f area %d mins %.0f %.0f %.0f maxs %.0f %.0f %.0f centre %.0f %.0f grounded %d\n", pt[0], pt[1], pt[2], pa,
+				aasworld.areas[pa].mins[0], aasworld.areas[pa].mins[1], aasworld.areas[pa].mins[2], aasworld.areas[pa].maxs[0], aasworld.areas[pa].maxs[1], aasworld.areas[pa].maxs[2],
+				aasworld.areas[pa].center[0], aasworld.areas[pa].center[1], AAS_AreaGrounded(pa));
+			else botimport.Print(PRT_MESSAGE, "ig: gapjump point %.0f %.0f %.0f no area\n", pt[0], pt[1], pt[2]);
+		}
+	}
+	if (!LibVarValue("ig_gapjumps", "0")) maxgap = 0;	/* momentum jumps only */
 	for (a = 1; a < aasworld.numareas && nfound < IG_GJ_MAX; a++) {
 		aas_area_t *ar = &aasworld.areas[a];
 		vec3_t mid0;
 		vec3_t o;
 
 		VectorSet(o, ar->center[0], ar->center[1], ar->mins[2] + 1);
-		if (debug >= 3 && ar->mins[0] < LibVarValue("ig_gapjumpwatchx", "0") + 200 && ar->maxs[0] > LibVarValue("ig_gapjumpwatchx", "0") - 200 && ar->mins[1] < LibVarValue("ig_gapjumpwatchy", "0") && ar->maxs[1] > LibVarValue("ig_gapjumpwatchy", "0") && ar->maxs[2] > 300 && ar->mins[2] < 400)
+		if (debug >= 3 && ar->mins[0] < atof(LibVarString("ig_gapjumpwatchx", "0")) + 200 && ar->maxs[0] > atof(LibVarString("ig_gapjumpwatchx", "0")) - 200 && ar->mins[1] < atof(LibVarString("ig_gapjumpwatchy", "0")) && ar->maxs[1] > atof(LibVarString("ig_gapjumpwatchy", "0")) && ar->maxs[2] > 300 && ar->mins[2] < 400)
 			botimport.Print(PRT_MESSAGE, "ig: gapjump near area %d centre %.0f %.0f %.0f mins %.0f %.0f maxs %.0f %.0f grounded %d crouch %d contents %d inarea %d ground %d\n", a, o[0], o[1], o[2],
 				ar->mins[0], ar->mins[1], ar->maxs[0], ar->maxs[1], AAS_AreaGrounded(a), AAS_AreaCrouch(a), aasworld.areasettings[a].contents, AAS_PointAreaNum(o), IGJ_Ground(o, 32, mid0));
 		if (!AAS_AreaGrounded(a) || AAS_AreaSwim(a) || AAS_AreaCrouch(a)) continue;
 		if (aasworld.areasettings[a].contents & (AREACONTENTS_LAVA | AREACONTENTS_SLIME | AREACONTENTS_JUMPPAD | AREACONTENTS_TELEPORTER)) continue;
-		VectorSet(o, ar->center[0], ar->center[1], ar->mins[2] + 1);
+		/* take-off points: the centre, and with ig_fastjumps up to 5 along each
+		 * long side -- bspc cuts q2rdm11's walkway end into thin north-south
+		 * strips whose centres sit 190 units south of where a bot runs */
+		{
+		int nsx = 1, nsy = 1, ix, iy;
+		if (fast) {
+			float ex = ar->maxs[0] - ar->mins[0], ey = ar->maxs[1] - ar->mins[1];
+			if (ex > 96) nsx = ex / 64 > 5 ? 5 : (int) (ex / 64);
+			if (ey > 96) nsy = ey / 64 > 5 ? 5 : (int) (ey / 64);
+		}
+		for (ix = 0; ix < nsx; ix++)
+		for (iy = 0; iy < nsy; iy++) {
+		VectorSet(o, nsx == 1 ? ar->center[0] : ar->mins[0] + (ix + 0.5f) * (ar->maxs[0] - ar->mins[0]) / nsx,
+			nsy == 1 ? ar->center[1] : ar->mins[1] + (iy + 0.5f) * (ar->maxs[1] - ar->mins[1]) / nsy, ar->mins[2] + 1);
 		if (AAS_PointAreaNum(o) != a || !IGJ_Ground(o, 32, o)) continue;
 		for (k = 0; k < IG_GJ_DIRS && nfound < IG_GJ_MAX; k++) {
 			vec3_t d, q, n, f, e, L, land, below, mid;
-			float s, gap, t;
+			float s, gap, t, needsp = 0;
 			int ta, la, ok = 0;
 			aas_trace_t tr;
 
@@ -137,13 +185,15 @@ void IG_GapJumpsAtLoad(void)
 			VectorCopy(q, e);
 			ta = AAS_PointAreaNum(e);
 			if (!ta || !AAS_AreaGrounded(ta)) { IGJ_Rej(debug, "edge area", e, k); continue; }
-			/* the far side: floor at the same height */
+			/* the far side: floor at the same height (momentum jumps: further, and
+			 * down to ig_fastjumpdrop below) */
 			la = 0;
-			for (gap = 40; gap <= maxgap; gap += 8) {
+			for (gap = 40; gap <= (fast ? (fastmax > maxgap ? fastmax : maxgap) : maxgap); gap += 8) {
+				float drop = fast ? fastdrop : 48;
 				VectorMA(e, gap, d, L);
 				L[2] += 18;
 				if (AAS_PointAreaNum(L) == 0 && (AAS_PointContents(L) & CONTENTS_SOLID)) break;	/* into a wall */
-				if (IGJ_Ground(L, 66, f) && f[2] >= e[2] - 48 && f[2] <= e[2] + 18) {
+				if (IGJ_Ground(L, 66 + drop - 48, f) && f[2] >= e[2] - drop && f[2] <= e[2] + 18) {
 					la = AAS_PointAreaNum(f);
 					break;
 				}
@@ -168,10 +218,29 @@ void IG_GapJumpsAtLoad(void)
 				vec3_t b2; VectorCopy(tr.endpos, b2); b2[2] -= 8;
 				if (AAS_PointContents(b2) & (CONTENTS_LAVA | CONTENTS_SLIME)) continue;
 			}
-			if (!IGJ_Fly(e, d, speed, la, land, &t)) { IGJ_Rej(debug, "flight", e, k); continue; }
-			/* one per pair of areas: the narrowest gap */
+			{	/* the slowest take-off that lands: a run (a TRAVEL_JUMP), or with
+				 * ig_fastjumps up to ig_fastjumpneed (a TRAVEL_STRAFEJUMP, offered
+				 * only to a bot already moving fast: IG_FastJumpTfl) */
+				float sp, top = fast ? fastneed : speed;
+				int lowjump;
+				for (sp = speed; sp <= top; sp += 25)
+					if (IGJ_Fly(e, d, sp, la, land, &t)) break;
+				if (sp > top) { IGJ_Rej(debug, "flight", e, k); continue; }
+				lowjump = gap <= maxgap && land[2] >= e[2] - 48 && sp <= speed;
+				if (!lowjump && !fast) continue;
+				needsp = sp;
+				/* a momentum jump is only offered from ig_fastjumpon u/s: price its
+				 * flight at that speed when that still lands there */
+				if (sp > speed) {
+					vec3_t land2; float t2, on = LibVarValue("ig_fastjumpon", "500");
+					if (on > sp && IGJ_Fly(e, d, on, la, land2, &t2)) t = t2;
+				}
+			}
+			/* one per pair of areas and take-off spot: the narrowest gap (spots
+			 * 96+ apart stay apart -- the routing picks by where a bot comes in) */
 			for (i = 0; i < nfound; i++)
-				if (found[i].from == ta && found[i].r.areanum == la) break;
+				if (found[i].from == ta && found[i].r.areanum == la &&
+					(!fast || (found[i].r.start[0] - e[0]) * (found[i].r.start[0] - e[0]) + (found[i].r.start[1] - e[1]) * (found[i].r.start[1] - e[1]) < 96 * 96)) break;
 			if (i < nfound) { if (found[i].gap <= gap) continue; }
 			else i = nfound++;
 			Com_Memset(&found[i], 0, sizeof(found[i]));
@@ -180,8 +249,42 @@ void IG_GapJumpsAtLoad(void)
 			found[i].r.areanum = la;
 			VectorCopy(e, found[i].r.start);
 			VectorCopy(land, found[i].r.end);
-			found[i].r.traveltype = TRAVEL_JUMP;
-			found[i].r.traveltime = (unsigned short) (100 * (t + price));
+			if (needsp > speed) {
+				found[i].r.traveltype = TRAVEL_STRAFEJUMP;
+				found[i].r.traveltime = (unsigned short) (100 * (t + fastprice));
+			} else {
+				found[i].r.traveltype = TRAVEL_JUMP;
+				found[i].r.traveltime = (unsigned short) (100 * (t + price));
+			}
+			found[i].need = needsp;
+			/* a momentum jump is also a route from the area the straight run-up
+			 * starts in (the walkway itself): bspc joins thin floor strips only
+			 * through points at their middle, so routed via the edge area the run
+			 * prices as a dogleg and the long way round wins (q2rdm11's walkway end) */
+			if (needsp > speed && a != ta && a != la && nfound < IG_GJ_MAX && !IGJ_HasRoute(a, la)) {
+				int c1 = aasworld.areasettings[a].cluster, c2 = aasworld.areasettings[la].cluster;
+				vec3_t run; float on = LibVarValue("ig_fastjumpon", "500"), rl;
+				VectorSubtract(e, o, run); run[2] = 0; rl = VectorLength(run);
+				if ((c1 == c2 || c1 < 0 || c2 < 0) && rl > 32) {
+					for (i = 0; i < nfound; i++)
+						if (found[i].from == a && found[i].r.areanum == la &&
+							(found[i].r.start[0] - o[0]) * (found[i].r.start[0] - o[0]) + (found[i].r.start[1] - o[1]) * (found[i].r.start[1] - o[1]) < 96 * 96) break;
+					if (i == nfound) {
+						i = nfound++;
+						Com_Memset(&found[i], 0, sizeof(found[i]));
+						found[i].from = a;
+						found[i].gap = gap;
+						found[i].need = needsp;
+						found[i].r.areanum = la;
+						VectorCopy(o, found[i].r.start);
+						VectorCopy(land, found[i].r.end);
+						found[i].r.traveltype = TRAVEL_STRAFEJUMP;
+						found[i].r.traveltime = (unsigned short) (100 * (rl / on + t + fastprice));
+					}
+				}
+			}
+		}
+		}	/* take-off points */
 		}
 	}
 	/* bspc's own jumps over gaps: priced as a long detour (q2rdm11's walkway gap
@@ -189,7 +292,7 @@ void IG_GapJumpsAtLoad(void)
 	 * A jump whose flight lands where it says, over a floor that is not lava,
 	 * slime or nothing, costs its flight and the take-off price
 	 * (ig_gapjumpreprice, default 1 with ig_gapjumps). */
-	if (LibVarValue("ig_gapjumpreprice", "1")) {
+	if (LibVarValue("ig_gapjumps", "0") && LibVarValue("ig_gapjumpreprice", "1")) {
 		int r, repriced = 0;
 		for (r = 1; r < aasworld.reachabilitysize; r++) {
 			aas_reachability_t *rr = &aasworld.reachability[r];
@@ -237,8 +340,10 @@ void IG_GapJumpsAtLoad(void)
 		for (j = i; j < nfound; j++)
 			if (found[j].from == from) {
 				nr[k++] = found[j].r;
-				if (debug) botimport.Print(PRT_MESSAGE, "ig: gapjump area %d -> %d gap %.0f from %.0f %.0f %.0f to %.0f %.0f %.0f time %d\n", from, found[j].r.areanum,
-						found[j].gap, found[j].r.start[0], found[j].r.start[1], found[j].r.start[2], found[j].r.end[0], found[j].r.end[1], found[j].r.end[2], found[j].r.traveltime);
+				if (debug) botimport.Print(PRT_MESSAGE, "ig: %s area %d -> %d gap %.0f need %.0f from %.0f %.0f %.0f to %.0f %.0f %.0f time %d\n",
+						(found[j].r.traveltype & TRAVELTYPE_MASK) == TRAVEL_STRAFEJUMP ? "fastjump" : "gapjump", from, found[j].r.areanum,
+						found[j].gap, found[j].need, found[j].r.start[0], found[j].r.start[1], found[j].r.start[2], found[j].r.end[0], found[j].r.end[1], found[j].r.end[2], found[j].r.traveltime);
+				if ((found[j].r.traveltype & TRAVELTYPE_MASK) == TRAVEL_STRAFEJUMP) nfast++;
 				found[j].from = -1;
 			}
 		as->firstreachablearea = aasworld.reachabilitysize;
@@ -249,5 +354,9 @@ void IG_GapJumpsAtLoad(void)
 		added += n;
 	}
 	IG_BlockedResize();
-	botimport.Print(PRT_MESSAGE, "ig: %d gap jumps added\n", added);
+	botimport.Print(PRT_MESSAGE, "ig: %d gap jumps added (%d momentum jumps)\n", added, nfast);
+	igfj_enabled = fast;
+	igfj_onspd = LibVarValue("ig_fastjumpon", "500");
+	igfj_offspd = LibVarValue("ig_fastjumpoff", "380");
+	Com_Memset(igfj_on, 0, sizeof(igfj_on));
 }
