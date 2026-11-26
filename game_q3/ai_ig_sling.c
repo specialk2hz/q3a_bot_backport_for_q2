@@ -1794,7 +1794,7 @@ void IG_Slingshot(bot_state_t *bs, bot_goal_t *goal, bot_moveresult_t *moveresul
 			int padover = IG_PlanPadOver(bs);	/* every think: it watches for the landing */
 
 			if (c >= 0 && c < MAX_CLIENTS && IG_InPadFlight(bs) && !padover) {
-				IG_PlanPadTop(bs, goal, moveresult);	/* IG-40: Billy's pad trick, a slingshot at the top */
+				if (!IG_PlanPadTop(bs, goal, moveresult)) IG_PlanPadAir(bs);	/* IG-40: Billy's pad trick, a slingshot at the top; else steer to the landing */
 				return;
 			}
 		}

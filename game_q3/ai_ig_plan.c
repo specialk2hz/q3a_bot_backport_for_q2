@@ -1717,6 +1717,85 @@ int IG_PlanPadSlingOn(void)
 	return IG_PlanOn() && LibVarValue("ig_planpadsling", "0") != 0;
 }
 
+/* The view in a jump pad's flight (libvar ig_planpadview, default 1, with the
+ * planner). The stock pad travel steers the air toward the landing and leaves
+ * the view to the roam clamp (be_interface_q2.c), which follows that push as it
+ * swings: on q2rdm11's twin pads the view sat 61 degrees off the travel, behind
+ * the bot 25% of the flight, turning 226 deg/s (Billy: "they look like they're
+ * spinning ... they should be facing the direction they want to land unless
+ * they are trying to do a trick or shoot someone"). The bot's input is turned
+ * by its view, so a spinning view also spoils the air control. Here: level,
+ * toward the landing; within 48 units of it, along the travel. An enemy, a
+ * hook's flick or the planner's own steering come first. */
+int IG_PlanPadView(bot_state_t *bs)
+{
+	int c = bs->client;
+	vec3_t end, d;
+
+	if (!IG_PlanOn() || c < 0 || c >= MAX_CLIENTS || !LibVarValue("ig_planpadview", "1")) return 0;
+	if (igp_state[c].hookout) return 0;
+	if (bs->cur_ps.groundEntityNum != ENTITYNUM_NONE) {
+		/* the last steps onto the pad: turn to the landing now, not in the air */
+		vec3_t st;
+		if (!IG_PadApproach2(c, st, end)) return 0;
+		VectorSubtract(st, bs->origin, d);
+		d[2] = 0;
+		if (VectorLength(d) > LibVarValue("ig_planpadviewnear", "128")) return 0;
+	}
+	else if (!IG_PadFlight(c, end)) return 0;
+	if (LibVarValue("ig_viewdebug", "0")) BotAI_Print(PRT_MESSAGE, "igpadview %d end %.0f %.0f %.0f\n", c, end[0], end[1], end[2]);
+	VectorSubtract(end, bs->origin, d);
+	d[2] = 0;
+	if (VectorLength(d) < 48) {
+		VectorSet(d, bs->cur_ps.velocity[0], bs->cur_ps.velocity[1], 0);
+		if (VectorLength(d) < 50) return 0;
+	}
+	bs->ideal_viewangles[YAW] = AngleMod(atan2(d[1], d[0]) * 180 / M_PI);
+	bs->ideal_viewangles[PITCH] = 0;
+	return 1;
+}
+
+/* Air control in a pad's flight (libvar ig_planpadair, default 1, with the
+ * planner). The stock pad steering (BotAirControl) pushes at full strength
+ * at the landing it predicts without the push itself, so it overcorrects: on
+ * q2rdm11's twin pads bots drifted past the landing into the side wall and
+ * fell (Billy: "they're not bouncing to the optimal spot"). Here, each think:
+ * no push, or one of 16 directions held for the rest of the flight, each flown
+ * by the simulator; the one that lands nearest the pad's landing (a landing
+ * below it priced x3 per unit; lava out) is the input. */
+int IG_PlanPadAir(bot_state_t *bs)
+{
+	int c = bs->client, k, t, half, best = -2;
+	vec3_t end, wish, bestwish = {0, 0, 0}, d;
+	float bestd = 1e9f, fm, sm, yaw = bs->viewangles[YAW];
+	igpm_t pm;
+
+	if (!IG_PlanOn() || c < 0 || c >= MAX_CLIENTS || !LibVarValue("ig_planpadair", "1")) return 0;
+	if (bs->cur_ps.groundEntityNum != ENTITYNUM_NONE || igp_state[c].hookout) return 0;
+	if (!IG_PadFlight(c, end)) return 0;
+	for (k = -1; k < 16; k++) {
+		float dist;
+
+		if (k < 0) VectorClear(wish);
+		else VectorSet(wish, cos(k * M_PI / 8), sin(k * M_PI / 8), 0);
+		IG_PmoveInit(&pm, bs->cur_ps.origin, bs->cur_ps.velocity, 0, bs->entitynum, 0);
+		IGX_Moves(wish, yaw, &fm, &sm);
+		for (t = 0; t < 60 && !pm.ground; t++)
+			for (half = 0; half < 2 && !pm.ground; half++)
+				IG_Pmove(&pm, fm, sm, 0, 0, yaw, 25);
+		if (pm.everhit & (CONTENTS_LAVA | CONTENTS_SLIME)) continue;
+		VectorSubtract(end, pm.org, d);
+		dist = sqrt(d[0] * d[0] + d[1] * d[1]);
+		if (end[2] - pm.org[2] > 32) dist += 3 * (end[2] - pm.org[2] - 32);
+		if (dist < bestd - 1) { bestd = dist; best = k; VectorCopy(wish, bestwish); }
+	}
+	if (best < -1) return 0;
+	EA_Move(c, bestwish, best < 0 ? 0 : 400);
+	if (trap_Cvar_VariableIntegerValue("ig_plandebug") == 4)
+		BotAI_Print(PRT_MESSAGE, "igpadair %d dir %d miss %.0f\n", c, best, bestd);
+	return 1;
+}
+
 /* The view on a flight the planner steers (libvar ig_planflightview, default
  * 1). With no enemy the stock look-ahead (or a random roam spot), clamped near
  * the push direction (be_interface_q2.c), chased a target that jumped around

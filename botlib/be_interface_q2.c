@@ -138,6 +138,7 @@ extern void IG_PredCheck(bot_state_t *bs, const bot_input_t *bi); /* IG: ai_ig_p
 extern void IG_PlanTick(bot_state_t *bs);  /* IG: ai_ig_plan.c */
 extern int  IG_PlanViewSet(int c);
 extern int  IG_PlanFlightView(bot_state_t *bs);
+extern int  IG_PlanPadView(bot_state_t *bs);
 extern void IG_PlanGuard(bot_state_t *bs, bot_input_t *bi);
 extern void BotChooseWeapon(bot_state_t *bs);
 extern int  AINode_Battle_Fight(bot_state_t *bs);
@@ -2575,7 +2576,9 @@ static int Q2BotAI(int client, float thinktime)
                         bs->viewangles[YAW], bs->ideal_viewangles[YAW], atan2(w.dir[1], w.dir[0]) * 180 / M_PI, w.speed, bs->enemy,
                         IG_PlanViewSet(client), bs->flags);
     }
-    if (bs->enemy < 0 && !IG_PlanViewSet(client) && IG_PlanFlightView(bs)) {
+    if (bs->enemy < 0 && !IG_PlanViewSet(client) && IG_PlanPadView(bs)) {
+        /* IG: a pad's flight looks at its landing (IG-40) */
+    } else if (bs->enemy < 0 && !IG_PlanViewSet(client) && IG_PlanFlightView(bs)) {
         /* IG: a planner-steered flight looks where a strafing player looks (IG-40) */
     } else if (bs->enemy < 0 && !IG_PlanViewSet(client)) {   /* IG: not over a planner's flick (IG-40) */
         bot_input_t walk;

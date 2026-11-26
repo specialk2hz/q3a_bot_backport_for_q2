@@ -648,6 +648,30 @@ void IG_NotePadFlight(int client, const vec3_t end)
 	ig_padseen[client] = AAS_Time();
 }
 
+/* The pad a bot is walking onto (BotTravel_JumpPad), for the view before the launch */
+static vec3_t ig_appstart[MAX_CLIENTS], ig_append[MAX_CLIENTS];
+static float  ig_appseen[MAX_CLIENTS];
+
+void IG_NotePadApproach(int client, const vec3_t start, const vec3_t end)
+{
+	if (client < 0 || client >= MAX_CLIENTS) return;
+	VectorCopy(start, ig_appstart[client]);
+	VectorCopy(end, ig_append[client]);
+	ig_appseen[client] = AAS_Time();
+}
+
+int IG_PadApproach2(int client, vec3_t start, vec3_t end)
+{
+	float t;
+
+	if (client < 0 || client >= MAX_CLIENTS) return 0;
+	t = AAS_Time() - ig_appseen[client];
+	if (ig_appseen[client] <= 0 || t < 0 || t > 0.25f) return 0;
+	VectorCopy(ig_appstart[client], start);
+	VectorCopy(ig_append[client], end);
+	return 1;
+}
+
 /* true while the bot is in a pad's flight (noted within the last 0.25 s) */
 int IG_PadFlight(int client, vec3_t end)
 {
@@ -1426,6 +1450,16 @@ int IG_PadReachList(int *out, int max)	/* IG-43: the routes added, for the pad d
 	return i;
 }
 
+/* IG-6's per-route marks: room for route numbers added at load (IG-43, IG-46) */
+void IG_BlockedResize(void)
+{
+	if (ig_blocked && ig_blockedsize < aasworld.reachabilitysize) {
+		unsigned char *nb = calloc(aasworld.reachabilitysize, 1);
+
+		if (nb) { memcpy(nb, ig_blocked, ig_blockedsize); free(ig_blocked); ig_blocked = nb; ig_blockedsize = aasworld.reachabilitysize; }
+	}
+}
+
 void IG_PadReachAtLoad(void)
 {
 	int ent, a, i, k, added = 0, pads = 0, skipped = 0, padareas[16], npad, newsize;
@@ -1540,10 +1574,6 @@ void IG_PadReachAtLoad(void)
 			added += nextra[i];
 		}
 	}
-	if (added && ig_blocked && ig_blockedsize < aasworld.reachabilitysize) {	/* IG-6's per-route marks: room for the new numbers */
-		unsigned char *nb = calloc(aasworld.reachabilitysize, 1);
-
-		if (nb) { memcpy(nb, ig_blocked, ig_blockedsize); free(ig_blocked); ig_blocked = nb; ig_blockedsize = aasworld.reachabilitysize; }
-	}
+	if (added) IG_BlockedResize();
 	if (pads) botimport.Print(PRT_MESSAGE, "ig: %d pad routes added from %d straight-up pads (%d floors in another cluster)\n", added, pads, skipped);
 }

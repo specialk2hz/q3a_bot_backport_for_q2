@@ -48,6 +48,7 @@ Foundation, Inc., 51 Franklin St, Fifth Floor, Boston, MA  02110-1301  USA
 #define ROUTING_DEBUG
 
 //travel time in hundreths of a second = distance * 100 / speed
+void IG_RouteMomentum(void);	// IG: be_ig_route.c, IG-46
 #define DISTANCEFACTOR_CROUCH		1.3f		//crouch speed = 100
 #define DISTANCEFACTOR_SWIM			1		//should be 0.66, swim speed = 150
 #define DISTANCEFACTOR_WALK			0.33f	//walk speed = 300
@@ -1287,6 +1288,7 @@ void AAS_InitRouting(void)
 	AAS_InitPortalCache();
 	//initialize the area travel times
 	AAS_CalculateAreaTravelTimes();
+	IG_RouteMomentum();	// IG: IG-46
 	//calculate the maximum travel times through portals
 	AAS_InitPortalMaxTravelTimes();
 	//get the areas reachabilities go through

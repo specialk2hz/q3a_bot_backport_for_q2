@@ -3340,6 +3340,7 @@ bot_moveresult_t BotTravel_JumpPad(bot_movestate_t *ms, aas_reachability_t *reac
 	vec3_t hordir;
 	bot_moveresult_t_cleared( result );
 
+	IG_NotePadApproach(ms->client, reach->start, reach->end);	/* IG: face the landing before the launch (IG-40) */
 	//first walk straight to the reachability start
 	hordir[0] = reach->start[0] - ms->origin[0];
 	hordir[1] = reach->start[1] - ms->origin[1];
@@ -3833,6 +3834,56 @@ static int IG_PadDrill(bot_movestate_t *ms, bot_moveresult_t *result)
 				VectorSet(igpd_goal.mins, -8, -8, -8);
 				VectorSet(igpd_goal.maxs, 8, 8, 8);
 				igpd.phase = 1; igpd.t0 = now; igpd.padtop = 0; igpd.padin = 0; igpd.launched = 0; igpd.landed = 0; igpd.via = 0;
+				{	/* the routing's own estimate, direct and through ig_paddrillreach (1/100 s) */
+					vec3_t sp;
+					int sa, fr = (int) LibVarValue("ig_paddrillreach", "0"), td, t1 = -1, t2 = -1;
+
+					VectorSet(sp, sx, sy, sz + 8);
+					sa = AAS_PointAreaNum(sp);
+					td = sa ? AAS_AreaTravelTimeToGoalArea(sa, sp, igpd_goal.areanum, TFL_DEFAULT | TFL_GRAPPLEHOOK) : -1;
+					if (sa && fr > 0 && fr < aasworld.reachabilitysize) {
+						aas_reachability_t *rr = &aasworld.reachability[fr];
+						t1 = AAS_AreaTravelTimeToGoalArea(sa, sp, rr->areanum, TFL_DEFAULT | TFL_GRAPPLEHOOK);
+						t2 = AAS_AreaTravelTimeToGoalArea(rr->edgenum ? AAS_PointAreaNum(rr->end) : AAS_PointAreaNum(rr->end), rr->end, igpd_goal.areanum, TFL_DEFAULT | TFL_GRAPPLEHOOK);
+						botimport.Print(PRT_MESSAGE, "igpaddrill predict direct %d to-reach %d reach %d after %d\n", td, t1, rr->traveltime, t2);
+						{	void IG_RouteDebugPath(const char *tag, vec3_t org, int goal);
+							vec3_t w = {300, 1110, 352}, lnd;
+							VectorCopy(rr->end, lnd);
+							int wa = 0, k2;
+							for (k2 = 0; k2 < 8 && !(wa = AAS_PointAreaNum(w)); k2++) w[2] += 8;
+							botimport.Print(PRT_MESSAGE, "igrdbg walkway from area %d to area %d\n", AAS_PointAreaNum(lnd), wa);
+							IG_RouteDebugPath("walkway", lnd, wa);
+							IG_RouteDebugPath("walkgoal", w, igpd_goal.areanum);
+							{	/* where the walkway breaks: from points along it to the waypoint */
+								int xs[] = {1200, 1000, 800, 700, 650, 600, 560, 520, 450}, q;
+								for (q = 0; q < 9; q++) {
+									vec3_t pt; int pa = 0, k3, tt2 = 0;
+									VectorSet(pt, xs[q], 1100, 344);
+									for (k3 = 0; k3 < 10 && !(pa = AAS_PointAreaNum(pt)); k3++) pt[2] += 8;
+									if (pa) tt2 = AAS_AreaTravelTimeToGoalArea(pa, pt, wa, TFL_DEFAULT | TFL_GRAPPLEHOOK);
+									botimport.Print(PRT_MESSAGE, "igrdbg along x %d z %.0f area %d to waypoint %d\n", xs[q], pt[2], pa, tt2);
+								}
+							}
+						}
+						{	/* the route steps, direct and to the pad */
+							int pass;
+							for (pass = 0; pass < 3; pass++) {
+								int a = pass < 2 ? sa : AAS_PointAreaNum(rr->end), goal = pass == 1 ? rr->areanum : igpd_goal.areanum, k, tt, rn;
+								vec3_t o;
+								VectorCopy(pass < 2 ? sp : rr->end, o);
+								for (k = 0; k < 40 && a && a != goal; k++) {
+									if (!AAS_AreaRouteToGoalArea(a, o, goal, TFL_DEFAULT | TFL_GRAPPLEHOOK, &tt, &rn) || !rn) break;
+									botimport.Print(PRT_MESSAGE, "igroute %s %d area %d reach %d type %d time %d left %d end %.0f %.0f %.0f\n", pass == 0 ? "direct" : pass == 1 ? "topad" : "after", k, a,
+										rn, aasworld.reachability[rn].traveltype & TRAVELTYPE_MASK, aasworld.reachability[rn].traveltime, tt,
+										aasworld.reachability[rn].end[0], aasworld.reachability[rn].end[1], aasworld.reachability[rn].end[2]);
+									VectorCopy(aasworld.reachability[rn].end, o);
+									a = aasworld.reachability[rn].areanum;
+								}
+							}
+						}
+					}
+					else botimport.Print(PRT_MESSAGE, "igpaddrill predict direct %d\n", td);
+				}
 				return 1;
 			case 1:
 				if (now - igpd.t0 < 0.5f) return 1;
