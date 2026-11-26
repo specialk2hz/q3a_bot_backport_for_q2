@@ -1007,13 +1007,13 @@ static void IG_HookMove(bot_state_t *bs, int infight)
 		f->lastkill = bs->killedenemy_time;
 		f->shot = 0;
 		f->misses = 0;
-		if (random() < IG_REPO_AFTER_KILL * IG_HookScale(bs)) f->urge = 1;
+		if (random() < LibVarValue("ig_repokill", "0.4") * IG_HookScale(bs)) f->urge = 1;	/* default IG_REPO_AFTER_KILL */
 	}
 	else if (f->shot > 0 && FloatTime() - f->shot > IG_HIT_WINDOW) {
 		f->shot = 0;
-		if (++f->misses >= IG_REPO_MISSES) {
+		if (++f->misses >= LibVarValue("ig_repomisses", "2")) {	/* default IG_REPO_MISSES */
 			f->misses = 0;
-			if (random() < IG_HookScale(bs)) f->urge = 1;
+			if (random() < LibVarValue("ig_repomisschance", "1") * IG_HookScale(bs)) f->urge = 1;
 		}
 	}
 	if (ig_sling[c].state != IG_SLING_IDLE && ig_sling[c].state != IG_SLING_AFTER) return;   /* a slingshot is on */
@@ -1037,7 +1037,7 @@ static void IG_HookMove(bot_state_t *bs, int infight)
 			dist = VectorLength(d);
 			if (dist < 250 || dist > 1800) return;
 			BotEntityInfo(bs->client, &self);
-			if (random() > (EntityIsShooting(&self) ? IG_FIGHT_CHANCE : IG_FIGHT_IDLE) * IG_HookScale(bs)) return;
+			if (random() > (EntityIsShooting(&self) ? LibVarValue("ig_fighthookchance", "0.5") : LibVarValue("ig_fighthookidle", "0.03")) * IG_HookScale(bs)) return;	/* IG-40 tuning: defaults = IG_FIGHT_CHANCE/IDLE */
 			if (!IG_FightAnchor(bs, f->anchor, 0)) {
 				f->cooldown = FloatTime() + 0.5f;
 				return;
@@ -1059,7 +1059,7 @@ static void IG_HookMove(bot_state_t *bs, int infight)
 	case IG_FIGHT_AIMING:
 		if (FloatTime() - f->time > 0.4f) {
 			f->state = IG_FIGHT_NONE;
-			f->cooldown = FloatTime() + IG_FIGHT_COOLDOWN;
+			f->cooldown = FloatTime() + LibVarValue("ig_fighthookcooldown", "2.5");
 			return;
 		}
 		if (!IG_FlickReady(bs, f->anchor)) return;
@@ -1121,7 +1121,7 @@ static void IG_HookMove(bot_state_t *bs, int infight)
 			if (IG_PlanOn()) IG_PlanTakeFlight(c);	/* IG-40: the planner flies it and hops its landing */
 		}
 		f->state = IG_FIGHT_NONE;
-		f->cooldown = FloatTime() + IG_FIGHT_COOLDOWN;
+		f->cooldown = FloatTime() + LibVarValue("ig_fighthookcooldown", "2.5");
 		return;
 	}
 }
