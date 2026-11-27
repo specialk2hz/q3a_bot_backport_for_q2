@@ -102,6 +102,11 @@ typedef struct {
 	int			hasjump;					/* IG-47: a momentum jump ahead on the route (IGX_LookAhead) */
 	vec3_t		jumpfrom, jumpdir;			/* its take-off and its direction (level, unit) */
 	int			nearonly;					/* IGX_AnchorTry: only anchors short of the jump's edge */
+	int			hasdoor;					/* the jump's line ends in a doorway (the opening into the next room) */
+	vec3_t		doorc;						/* its centre */
+	vec3_t		jumpto;						/* the jump's landing */
+	int			hasroutet;					/* the route past the landing: its farthest point in a straight line */
+	vec3_t		routet;
 	int			climbrn;					/* IG-40 climbs: a grapple route ahead the planner climbs itself */
 	int			nclimb;
 	vec3_t		climbanch[3];				/* its anchors (bspc's, the climb table's frame and floor) */
@@ -132,7 +137,7 @@ static struct {
 	vec3_t	wish, view;
 	/* IG-47: the last momentum jump seen ahead, kept through its flight */
 	float	jumpuntil;
-	vec3_t	jumpfrom, jumpdir;
+	vec3_t	jumpfrom, jumpdir, jumpto;
 } igp_state[MAX_CLIENTS];
 
 /* ------------------------------------------------------------ diagnostics */
@@ -258,6 +263,65 @@ static int IGX_LineClear(bot_state_t *bs, const vec3_t a, const vec3_t b)
 
 /* IG-47: a momentum jump seen ahead stays in force until the bot is down on
  * the far side (1.5 s at most), so no hook past its edge mid-flight either */
+/* IG-47, Billy (2026-11-28, ztn2dm3): the lip slingshot "should be aimed to
+ * center the bot in the doorway" -- "the doorway is at the end of the intended
+ * line ... the lip grapple boosts you over the gap and into the next room via
+ * a doorway". The doorway: along the jump's line from its landing on to
+ * ig_fastjumpdoor (320) units past it, the narrowest opening (walls either side
+ * within 192 units each); its centre ends the line the slingshot aims. */
+static void IGX_Doorway(igx_t *x)
+{
+	vec3_t perp, p, a, b, mins = {-8, -8, -8}, maxs = {8, 8, 8}, line;
+	bsp_trace_t tl, tr;
+	float past = LibVarValue("ig_fastjumpdoor", "320"), s, best = 1e9f;
+
+	x->hasdoor = 0;
+	x->hasroutet = 0;
+	if (!x->hasjump) return;
+	{	/* Billy: "how can the lip grapple slingshot get the bot faster along the
+		 * route" -- the route on from the landing: the farthest of its next
+		 * points (within 700 units) in a clear line from the landing */
+		vec3_t o, pt, la, lb;
+		int ar = AAS_PointAreaNum(x->jumpto), k, tt, rn;
+		float dist = 0;
+		aas_reachability_t r;
+		VectorCopy(x->jumpto, o);
+		if (!ar) { VectorCopy(x->jumpto, pt); pt[2] += 16; ar = AAS_PointAreaNum(pt); }
+		for (k = 0; k < 8 && ar && ar != x->goalarea && dist < 700; k++) {
+			if (!AAS_AreaRouteToGoalArea(ar, o, x->goalarea, x->tfl, &tt, &rn) || !rn) break;
+			AAS_ReachabilityFromNum(rn, &r);
+			if ((r.traveltype & TRAVELTYPE_MASK) != TRAVEL_WALK) break;
+			dist += Distance(o, r.end);
+			VectorCopy(x->jumpto, la); la[2] += 18;
+			VectorCopy(r.end, lb); lb[2] += 18;
+			if (Distance(x->jumpto, r.end) > 96 && IGX_LineClear(x->bs, la, lb)) { VectorCopy(r.end, x->routet); x->hasroutet = 1; }
+			VectorCopy(r.end, o);
+			ar = r.areanum;
+		}
+	}
+	if (past <= 0) return;
+	VectorSubtract(x->jumpto, x->jumpfrom, line); line[2] = 0;
+	if (VectorNormalize(line) < 32) return;
+	VectorSet(perp, -line[1], line[0], 0);
+	for (s = 0; s <= past; s += 16) {
+		float l, r;
+		VectorMA(x->jumpto, s, line, p);
+		p[2] = x->jumpto[2] + 8;
+		VectorMA(p, 192, perp, a);
+		BotAI_Trace(&tl, p, mins, maxs, a, x->bs->entitynum, CONTENTS_SOLID);
+		if (tl.startsolid) break;	/* the line ran into a wall: no doorway past it */
+		VectorMA(p, -192, perp, b);
+		BotAI_Trace(&tr, p, mins, maxs, b, x->bs->entitynum, CONTENTS_SOLID);
+		if (tl.fraction >= 1 || tr.fraction >= 1) continue;
+		l = tl.fraction * 192; r = tr.fraction * 192;
+		if (l + r < best) {
+			best = l + r;
+			VectorMA(p, (l - r) * 0.5f, perp, x->doorc);
+			x->hasdoor = 1;
+		}
+	}
+}
+
 static void IGX_JumpKeep(igx_t *x)
 {
 	int c = x->bs->client;
@@ -266,6 +330,7 @@ static void IGX_JumpKeep(igx_t *x)
 		igp_state[c].jumpuntil = FloatTime() + 1.5f;
 		VectorCopy(x->jumpfrom, igp_state[c].jumpfrom);
 		VectorCopy(x->jumpdir, igp_state[c].jumpdir);
+		VectorCopy(x->jumpto, igp_state[c].jumpto);
 	} else if (FloatTime() < igp_state[c].jumpuntil) {
 		if (x->bs->cur_ps.groundEntityNum != ENTITYNUM_NONE) {
 			vec3_t pa; VectorSubtract(x->bs->cur_ps.origin, igp_state[c].jumpfrom, pa); pa[2] = 0;
@@ -274,6 +339,7 @@ static void IGX_JumpKeep(igx_t *x)
 		x->hasjump = 1;
 		VectorCopy(igp_state[c].jumpfrom, x->jumpfrom);
 		VectorCopy(igp_state[c].jumpdir, x->jumpdir);
+		VectorCopy(igp_state[c].jumpto, x->jumpto);
 	}
 }
 
@@ -340,7 +406,7 @@ static void IGX_LookAhead(igx_t *x, const vec3_t org, int area)
 		tv = r.traveltype & TRAVELTYPE_MASK;
 		if (tv == TRAVEL_STRAFEJUMP) {	/* IG-47: curve toward a momentum jump's landing */
 			VectorCopy(r.start, jumpfrom); VectorCopy(r.end, pts[n]); n++; jumpland = n - 1;
-			x->hasjump = 1; VectorCopy(r.start, x->jumpfrom);
+			x->hasjump = 1; VectorCopy(r.start, x->jumpfrom); VectorCopy(r.end, x->jumpto);
 			VectorSubtract(r.end, r.start, x->jumpdir); x->jumpdir[2] = 0; VectorNormalize(x->jumpdir);
 			{	/* the take-off may be the start of the run-up: the edge is where the floor ends */
 				int q; vec3_t p0, p1; bsp_trace_t gt;
@@ -799,6 +865,28 @@ static void IGX_AnchorTry(igx_t *x, float pitch, float yaw, float mind, int cls)
 	x->numanchors++;
 }
 
+/* IG-47 lip slingshot on a line: Billy's steep floor hooks (20-32 down) and low
+ * ceiling hooks (10-18 up), short of the edge, along the line from the bot to
+ * the target -- the pull sends the bot that way. (Aimed at the lip's very edge
+ * the hook grazed past it: 134 of 189 fired at nothing.) */
+static void IGX_LipOnLine(igx_t *x, const vec3_t target)
+{
+	static const float lippitch[3] = {20, 26, 32}, lipceil[3] = {-10, -14, -18};
+	vec3_t dir;
+	float yaw;
+	int j;
+
+	VectorSubtract(target, x->bs->origin, dir); dir[2] = 0;
+	if (VectorNormalize(dir) <= 64) return;
+	yaw = atan2(dir[1], dir[0]) * 180 / M_PI;
+	x->nearonly = 1;
+	for (j = 0; j < 3; j++) {
+		IGX_AnchorTry(x, lippitch[j], yaw, 100, IGA_SLING);
+		IGX_AnchorTry(x, lipceil[j], yaw, 100, IGA_SLING);
+	}
+	x->nearonly = 0;
+}
+
 static void IGX_Anchors(igx_t *x, const vec3_t routedir)
 {
 	/* + is down. From the eye on the ground (46 up) 12 down meets the floor
@@ -837,7 +925,13 @@ static void IGX_Anchors(igx_t *x, const vec3_t routedir)
 	 * the ceiling above the lip: 10-16 degrees up, 180-270 units, let go at
 	 * 935-970 (4 tries). Steep floor and low ceiling anchors short of the edge,
 	 * only with a momentum jump ahead (ig_fastjumplip) */
-	if (x->hasjump && LibVarValue("ig_fastjumplip", "1")) {
+	if (x->hasjump && (x->hasdoor || x->hasroutet) && LibVarValue("ig_fastjumplip", "1")) {
+		/* lines that carry the bot on along the route: to the doorway at the
+		 * end of the jump's line, and to the route's farthest straight point
+		 * past the landing; the sim picks the faster */
+		if (x->hasdoor) IGX_LipOnLine(x, x->doorc);
+		if (x->hasroutet) IGX_LipOnLine(x, x->routet);
+	} else if (x->hasjump && LibVarValue("ig_fastjumplip", "1")) {
 		static const float lippitch[3] = {20, 26, 32}, lipceil[3] = {-10, -14, -18};
 		x->nearonly = 1;
 		for (i = 0; i < 3; i++)
@@ -1050,7 +1144,7 @@ int IG_Plan(bot_state_t *bs, bot_goal_t *goal, bot_moveresult_t *mr)
 			if (VectorNormalize(routedir) < 64) VectorCopy(igp_padtoland, routedir);
 			else igp_padroute = 1;
 		}
-	} else if ((IGX_LookAhead(&x, pm.org, pm.area), IGX_JumpKeep(&x), !IGX_RouteDir(&x, pm.org, pm.area, routedir))) {
+	} else if ((IGX_LookAhead(&x, pm.org, pm.area), IGX_JumpKeep(&x), IGX_Doorway(&x), !IGX_RouteDir(&x, pm.org, pm.area, routedir))) {
 		if (!ours) return 0;
 		VectorSet(routedir, bs->cur_ps.velocity[0], bs->cur_ps.velocity[1], 0);
 		if (VectorNormalize(routedir) < 1) return 0;
