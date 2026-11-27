@@ -104,6 +104,7 @@ typedef struct {
 	int			nearonly;					/* IGX_AnchorTry: only anchors short of the jump's edge */
 	int			hasdoor;					/* the jump's line ends in a doorway (the opening into the next room) */
 	vec3_t		doorc;						/* its centre */
+	vec3_t		doorland;					/* a landing on the doorway's own axis, on the near side */
 	vec3_t		jumpto;						/* the jump's landing */
 	int			hasroutet;					/* the route past the landing: its farthest point in a straight line */
 	vec3_t		routet;
@@ -191,6 +192,21 @@ static int IGX_RouteDirS(igx_t *x, const vec3_t org, int area, vec3_t dir, int *
 	vec3_t t, o;
 
 	if (special) *special = 0;
+	/* IG-47: over a momentum jump's gap, heading for a doorway at the end of its
+	 * line -- steer for the doorway's centre, so the landing lines up with it
+	 * (Billy, ztn2dm3: "it needs to land more to the right so its centered with
+	 * the doorway"; the bots came down 170 units off its centre) -- until the
+	 * bot is down past the edge, or at the doorway */
+	if (x->hasjump && x->hasdoor && LibVarValue("ig_fastjumpdoorsteer", "1")) {
+		vec3_t pe, pd;
+		VectorSubtract(org, x->jumpfrom, pe); pe[2] = 0;
+		VectorSubtract(x->doorland, org, pd); pd[2] = 0;
+		if (VectorLength(pd) < 48) { VectorSubtract(x->doorc, org, pd); pd[2] = 0; }	/* on the axis: on through the door */
+		if (DotProduct(pe, x->jumpdir) > 0 && VectorLength(pd) > 48) {
+			VectorCopy(pd, dir);
+			return VectorNormalize(dir) > 1;
+		}
+	}
 	if (!area) return 0;
 	VectorCopy(org, o);
 	/* the look-ahead point (IGX_LookAhead), until it is reached or passed */
@@ -273,7 +289,7 @@ static void IGX_Doorway(igx_t *x)
 {
 	vec3_t perp, p, a, b, mins = {-8, -8, -8}, maxs = {8, 8, 8}, line;
 	bsp_trace_t tl, tr;
-	float past = LibVarValue("ig_fastjumpdoor", "320"), s, best = 1e9f;
+	float past = LibVarValue("ig_fastjumpdoor", "0"), s, best = 1e9f;	/* 0: off -- with the route past the landing the line lines up anyway (2026-11-28) */
 
 	x->hasdoor = 0;
 	x->hasroutet = 0;
@@ -319,6 +335,35 @@ static void IGX_Doorway(igx_t *x)
 			VectorMA(p, (l - r) * 0.5f, perp, x->doorc);
 			x->hasdoor = 1;
 		}
+	}
+	if (!x->hasdoor) return;
+	{	/* "centered with the doorway" is on its own axis: the narrowest way
+		 * across the opening is its span, the axis is square to it (q2rdm11's
+		 * diagonal line meets ztn2dm3's door in an east-west wall: its axis runs
+		 * north-south); the landing on that axis, on the near side, as far out
+		 * as the jump's landing is from the door (64..256) */
+		int k, bk = -1;
+		float bw = 1e9f, dl;
+		vec3_t sp, ax, toff;
+		for (k = 0; k < 12; k++) {
+			float ang = k * M_PI / 12, l, r;
+			VectorSet(sp, cos(ang), sin(ang), 0);
+			VectorMA(x->doorc, 256, sp, a);
+			BotAI_Trace(&tl, x->doorc, mins, maxs, a, x->bs->entitynum, CONTENTS_SOLID);
+			VectorMA(x->doorc, -256, sp, b);
+			BotAI_Trace(&tr, x->doorc, mins, maxs, b, x->bs->entitynum, CONTENTS_SOLID);
+			l = tl.fraction * 256; r = tr.fraction * 256;
+			if (l + r < bw) { bw = l + r; bk = k; }
+		}
+		VectorSet(sp, cos(bk * M_PI / 12), sin(bk * M_PI / 12), 0);
+		VectorSet(ax, -sp[1], sp[0], 0);
+		VectorSubtract(x->jumpfrom, x->doorc, toff); toff[2] = 0;
+		if (DotProduct(ax, toff) < 0) VectorScale(ax, -1, ax);
+		dl = Distance(x->jumpto, x->doorc);
+		if (dl < 64) dl = 64;
+		if (dl > 256) dl = 256;
+		VectorMA(x->doorc, dl, ax, x->doorland);
+		x->doorland[2] = x->jumpto[2];
 	}
 }
 
@@ -929,7 +974,7 @@ static void IGX_Anchors(igx_t *x, const vec3_t routedir)
 		/* lines that carry the bot on along the route: to the doorway at the
 		 * end of the jump's line, and to the route's farthest straight point
 		 * past the landing; the sim picks the faster */
-		if (x->hasdoor) IGX_LipOnLine(x, x->doorc);
+		if (x->hasdoor) IGX_LipOnLine(x, x->doorland);
 		if (x->hasroutet) IGX_LipOnLine(x, x->routet);
 	} else if (x->hasjump && LibVarValue("ig_fastjumplip", "1")) {
 		static const float lippitch[3] = {20, 26, 32}, lipceil[3] = {-10, -14, -18};
