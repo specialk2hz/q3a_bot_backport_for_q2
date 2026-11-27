@@ -99,6 +99,8 @@ typedef struct {
 	int			slinghop;					/* slingshots are flown with Billy's finish (ig_planslinghop) */
 	vec3_t		hookpos, hookdir;
 	int			haslook;					/* IGX_LookAhead found a point to curve toward */
+	int			hasjump;					/* IG-47: a momentum jump ahead on the route (IGX_LookAhead) */
+	vec3_t		jumpfrom, jumpdir;			/* its take-off and its direction (level, unit) */
 	float		turnahead;					/* the route's turn within a hop's reach, degrees */
 	vec3_t		look, lookfrom;
 } igx_t;
@@ -124,6 +126,9 @@ static struct {
 	float	decided;
 	int		ret, setmove, jump;
 	vec3_t	wish, view;
+	/* IG-47: the last momentum jump seen ahead, kept through its flight */
+	float	jumpuntil;
+	vec3_t	jumpfrom, jumpdir;
 } igp_state[MAX_CLIENTS];
 
 /* ------------------------------------------------------------ diagnostics */
@@ -246,6 +251,27 @@ static int IGX_LineClear(bot_state_t *bs, const vec3_t a, const vec3_t b)
 	return 1;
 }
 
+/* IG-47: a momentum jump seen ahead stays in force until the bot is down on
+ * the far side (1.5 s at most), so no hook past its edge mid-flight either */
+static void IGX_JumpKeep(igx_t *x)
+{
+	int c = x->bs->client;
+	if (c < 0 || c >= MAX_CLIENTS) return;
+	if (x->hasjump) {
+		igp_state[c].jumpuntil = FloatTime() + 1.5f;
+		VectorCopy(x->jumpfrom, igp_state[c].jumpfrom);
+		VectorCopy(x->jumpdir, igp_state[c].jumpdir);
+	} else if (FloatTime() < igp_state[c].jumpuntil) {
+		if (x->bs->cur_ps.groundEntityNum != ENTITYNUM_NONE) {
+			vec3_t pa; VectorSubtract(x->bs->cur_ps.origin, igp_state[c].jumpfrom, pa); pa[2] = 0;
+			if (DotProduct(pa, igp_state[c].jumpdir) > 32) { igp_state[c].jumpuntil = 0; return; }	/* down past the edge: done */
+		}
+		x->hasjump = 1;
+		VectorCopy(igp_state[c].jumpfrom, x->jumpfrom);
+		VectorCopy(igp_state[c].jumpdir, x->jumpdir);
+	}
+}
+
 static void IGX_LookAhead(igx_t *x, const vec3_t org, int area)
 {
 	vec3_t pts[16], o, a, b, jumpfrom;
@@ -254,6 +280,7 @@ static void IGX_LookAhead(igx_t *x, const vec3_t org, int area)
 	float dist = 0, maxd = LibVarValue("ig_planlookdist", "500");
 
 	x->haslook = 0;
+	x->hasjump = 0;
 	if (!LibVarValue("ig_planlook", "1") || !ar) return;
 	VectorCopy(org, o);
 	for (k = 0; k < 8 && n < 15 && dist < maxd; k++) {
@@ -261,7 +288,22 @@ static void IGX_LookAhead(igx_t *x, const vec3_t org, int area)
 		if (!AAS_AreaRouteToGoalArea(ar, o, x->goalarea, x->tfl, &tt, &rn) || !rn) break;
 		AAS_ReachabilityFromNum(rn, &r);
 		tv = r.traveltype & TRAVELTYPE_MASK;
-		if (tv == TRAVEL_STRAFEJUMP) { VectorCopy(r.start, jumpfrom); VectorCopy(r.end, pts[n]); n++; jumpland = n - 1; break; }	/* IG-47: curve toward a momentum jump's landing */
+		if (tv == TRAVEL_STRAFEJUMP) {	/* IG-47: curve toward a momentum jump's landing */
+			VectorCopy(r.start, jumpfrom); VectorCopy(r.end, pts[n]); n++; jumpland = n - 1;
+			x->hasjump = 1; VectorCopy(r.start, x->jumpfrom);
+			VectorSubtract(r.end, r.start, x->jumpdir); x->jumpdir[2] = 0; VectorNormalize(x->jumpdir);
+			{	/* the take-off may be the start of the run-up: the edge is where the floor ends */
+				int q; vec3_t p0, p1; bsp_trace_t gt;
+				for (q = 0; q < 40; q++) {
+					VectorMA(r.start, q * 16, x->jumpdir, p0);
+					VectorCopy(p0, p1); p1[2] -= 64;
+					BotAI_Trace(&gt, p0, NULL, NULL, p1, x->bs->entitynum, CONTENTS_SOLID);
+					if (gt.fraction >= 1) break;
+					VectorCopy(p0, x->jumpfrom);
+				}
+			}
+			break;
+		}
 		if (tv != TRAVEL_WALK) break;
 		VectorCopy(r.start, pts[n]); n++;
 		VectorCopy(r.end, pts[n]); n++;
@@ -577,6 +619,14 @@ static void IGX_Simulate(igx_t *x, igopt_t *o)
 			 * in his demo): every 50 ms pulled along the floor costs, as the
 			 * friction there takes the pull's speed */
 			if (pulled && pm.ground) wallpen += x->pullfloor;
+			/* IG-47 (Billy): before a momentum jump the hook is a slingshot -- let
+			 * go on this side and make the jump on the speed; still hooked past
+			 * the edge is a pull across, predictable: priced ig_fastjumphookacross
+			 * (off by default; 1 = 1 s) per 50 ms */
+			if (x->hasjump && pm.hook && !pm.ground) {
+				vec3_t pa; VectorSubtract(pm.org, x->jumpfrom, pa); pa[2] = 0;
+				if (DotProduct(pa, x->jumpdir) > 0) wallpen += LibVarValue("ig_fastjumphookacross", "0");
+			}
 		}
 		VectorCopy(in.view, x->lastview);	/* the game fires along this next think */
 		if (pm.everhit & (CONTENTS_LAVA | CONTENTS_SLIME)) return;	/* out */
@@ -684,6 +734,13 @@ static void IGX_AnchorTry(igx_t *x, float pitch, float yaw, float mind, int cls)
 	 * corridor's end or turn 400 units out was most of q2rdm4's "random
 	 * wall grapples" (575 of 898 slingshots there) */
 	if (cls == IGA_SLING && tr.plane.normal[2] <= 0.7f && VectorLength(d) < 600) return;
+	/* IG-47: a momentum jump ahead -- no hook past its take-off: the speed comes
+	 * from a slingshot on this side, let go before the edge, then the jump (Billy:
+	 * a pull straight across to the far wall is predictable) */
+	if (x->hasjump && LibVarValue("ig_fastjumpnoacross", "0")) {
+		vec3_t pa; VectorSubtract(tr.endpos, x->jumpfrom, pa); pa[2] = 0;
+		if (DotProduct(pa, x->jumpdir) > 0) return;
+	}
 	VectorCopy(tr.endpos, x->anchors[x->numanchors]);
 	vectoangles(d, x->anchorview[x->numanchors]);
 	if (x->anchorview[x->numanchors][PITCH] > 180) x->anchorview[x->numanchors][PITCH] -= 360;
@@ -912,7 +969,7 @@ int IG_Plan(bot_state_t *bs, bot_goal_t *goal, bot_moveresult_t *mr)
 			if (VectorNormalize(routedir) < 64) VectorCopy(igp_padtoland, routedir);
 			else igp_padroute = 1;
 		}
-	} else if ((IGX_LookAhead(&x, pm.org, pm.area), !IGX_RouteDir(&x, pm.org, pm.area, routedir))) {
+	} else if ((IGX_LookAhead(&x, pm.org, pm.area), IGX_JumpKeep(&x), !IGX_RouteDir(&x, pm.org, pm.area, routedir))) {
 		if (!ours) return 0;
 		VectorSet(routedir, bs->cur_ps.velocity[0], bs->cur_ps.velocity[1], 0);
 		if (VectorNormalize(routedir) < 1) return 0;
