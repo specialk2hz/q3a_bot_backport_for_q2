@@ -827,7 +827,7 @@ static float IGX_ClassMul(int cls)
 
 int IG_PlanOn(void)
 {
-	return trap_Cvar_VariableIntegerValue("ig_plan") && trap_Cvar_VariableIntegerValue("ig_hookdetect");
+	return trap_Cvar_VariableIntegerValue("ig_plan") != 0;	/* ig-0.5: with or without the hook (no hook: x.canfire 0, runs and hops) */
 }
 
 static void IGX_Flick(bot_state_t *bs, const vec3_t view)
@@ -894,7 +894,7 @@ int IG_Plan(bot_state_t *bs, bot_goal_t *goal, bot_moveresult_t *mr)
 			a2 ? AAS_AreaTravelTimeToGoalArea(a2, o2, x.goalarea, bs->tfl) : -1, a2 ? AAS_AreaTravelTimeToGoalArea(a2, o2, x.goalarea, bs->tfl | TFL_STRAFEJUMP) : -1, VectorLength(bs->cur_ps.velocity));
 	}
 	x.jumpland = trap_Cvar_VariableIntegerValue("ig_jumpland");
-	x.canfire = IG_CanFireHook(c);
+	x.canfire = IG_CanFireHook(c) && LibVarValue("bot_grapple", "0");	/* no hook in the mode (bot_grapple 0): runs and hops only */
 	x.flow = LibVarValue("ig_planflow", "0.2");
 	x.strafeskill = IG_StrafeSkill(bs);
 	{	/* once per bot and map: its strafe skill, for the logs */
