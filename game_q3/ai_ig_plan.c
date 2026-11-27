@@ -1188,6 +1188,16 @@ int IG_Plan(bot_state_t *bs, bot_goal_t *goal, bot_moveresult_t *mr)
 				opts[i].cost <= opts[pick].cost + LibVarValue("ig_planairhopmargin", "0.5")) { pick = i; break; }
 	}
 
+	/* IG-40 pad flights (2026-11-28): in a route's pad flight the planner flies
+	 * only its own hook -- the pad-top slingshot fired or under way. Picking
+	 * "run" or a hop it took over the air steering anyway, along the route
+	 * beyond the landing and for speed, and pushed bots off q2rdm11's twin-pad
+	 * ledge (11 of 11 hook-free misses in 16 fight matches were these); the
+	 * stock pad air control, which lands them, keeps the flight. */
+	if (igp_padmode && !x.hook && opts[pick].kind != PO_SLING && opts[pick].kind != PO_FIRE && LibVarValue("ig_planpadkeep", "1")) {
+		igp_state[c].active = 0;
+		return 0;
+	}
 	/* do its first think */
 	{
 		igopt_t *o = &opts[pick];
@@ -1749,7 +1759,11 @@ int IG_PlanPadFightFlight(bot_state_t *bs)
 	VectorCopy(bs->cur_ps.velocity, v);
 	if (IG_PadFlight(c, end)) { VectorCopy(end, igpf_end[c]); igpf_until[c] = FloatTime() + 3; }
 	else if (FloatTime() >= igpf_until[c]) {
-		if (v[2] < 300 || !IG_PadLaunchEnd(o, end)) return 0;	/* not rising off a pad */
+		if (v[2] < 300) return 0;
+		if (!IG_PadLaunchEnd(o, end)) {	/* not rising off a pad */
+			if (LibVarValue("ig_viewdebug", "0") && v[2] > 600) BotAI_Print(PRT_MESSAGE, "igpadsteer %d no pad under %.0f %.0f %.0f vz %.0f area %d\n", c, o[0], o[1], o[2], v[2], AAS_PointAreaNum(o));
+			return 0;
+		}
 		VectorCopy(end, igpf_end[c]);
 		igpf_until[c] = FloatTime() + 3;
 		if (LibVarValue("ig_viewdebug", "0")) BotAI_Print(PRT_MESSAGE, "igpadsteer %d node %s end %.0f %.0f %.0f\n", c, igp_node[c], end[0], end[1], end[2]);

@@ -1008,6 +1008,9 @@ void IG_Slingshot(bot_state_t *bs, bot_goal_t *goal, bot_moveresult_t *moveresul
 	{ bot_goal_t *dg = IG_PadDrillGoal(c); if (dg) goal = dg; }	/* IG-43's pad drill: its goal */
 	/* IG-40: the planner moves the bot; the trick-by-trick code stands down.
 	 * Kept for now: the jump-pad hooks, the lava escape, a fight hook's end. */
+	if (LibVarValue("ig_viewdebug", "0") && bs->cur_ps.velocity[2] > 500) {
+		vec3_t pe; BotAI_Print(PRT_MESSAGE, "igslx %d vz %.0f inpad %d padflight %d fight %d at %.0f %.0f %.0f\n", c, bs->cur_ps.velocity[2], IG_InPadFlight(bs), IG_PadFlight(c, pe), c >= 0 && c < MAX_CLIENTS ? ig_fight[c].state : -1, bs->origin[0], bs->origin[1], bs->origin[2]);
+	}
 	if (IG_PlanOn()) {
 		if (!IG_PlanPadSlingOn() && IG_PadHook(bs)) return;	/* the old end-of-arc hook, unless the pad top's */
 		if (IG_LavaEscape(bs)) return;
@@ -1025,6 +1028,7 @@ void IG_Slingshot(bot_state_t *bs, bot_goal_t *goal, bot_moveresult_t *moveresul
 			}
 		}
 		if (IG_PlanPadFightFlight(bs)) return;	/* IG-40: any other pad flight (one a bot ran over on its way elsewhere) steers to its landing */
+		if (LibVarValue("ig_viewdebug", "0") && bs->cur_ps.velocity[2] > 600) BotAI_Print(PRT_MESSAGE, "igpadsteer %d planner runs, vz %.0f at %.0f %.0f %.0f\n", c, bs->cur_ps.velocity[2], bs->origin[0], bs->origin[1], bs->origin[2]);
 		if (IG_PadApproach(bs, goal, moveresult)) return;
 		{ vec3_t dp; if (IG_PadDrillPad(c, dp)) return; }	/* IG-43's pad drill: on its way to the pad */
 		IG_Plan(bs, goal, moveresult);
