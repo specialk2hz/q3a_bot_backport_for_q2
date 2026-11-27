@@ -509,6 +509,7 @@ static void IG_HookMove(bot_state_t *bs, int infight)
 		}
 		if (!IG_FlickReady(bs, f->anchor)) return;
 		if (!IG_CanFireHook(c)) return;      /* OSP's hook_wait, shared */
+		if (IG_PlanPadFightActive(c)) { f->state = IG_FIGHT_NONE; return; }	/* IG-40: not in a pad flight */
 		/* IG-40: not a hook whose ride and let-go end in lava or a pit */
 		if (IG_PlanOn() && IG_PlanFireUnsafe(bs, f->anchor, 3)) {
 			BotAI_Print(PRT_MESSAGE, "ig: guard %d fighthook skip\n", c);
@@ -1023,6 +1024,7 @@ void IG_Slingshot(bot_state_t *bs, bot_goal_t *goal, bot_moveresult_t *moveresul
 				return;
 			}
 		}
+		if (IG_PlanPadFightFlight(bs)) return;	/* IG-40: any other pad flight (one a bot ran over on its way elsewhere) steers to its landing */
 		if (IG_PadApproach(bs, goal, moveresult)) return;
 		{ vec3_t dp; if (IG_PadDrillPad(c, dp)) return; }	/* IG-43's pad drill: on its way to the pad */
 		IG_Plan(bs, goal, moveresult);

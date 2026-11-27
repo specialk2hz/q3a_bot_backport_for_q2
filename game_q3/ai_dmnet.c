@@ -2120,7 +2120,8 @@ int AINode_Battle_Fight(bot_state_t *bs) {
 	//choose the best weapon to fight with
 	BotChooseWeapon(bs);
 	//do attack movements
-	if (IG_PlanFight(bs)) memset(&moveresult, 0, sizeof(moveresult));	/* IG: the planner's dodges (IG-40) */
+	if (IG_PlanPadFightFlight(bs)) memset(&moveresult, 0, sizeof(moveresult));	/* IG: a pad flight steers to its landing (IG-40) */
+	else if (IG_PlanFight(bs)) memset(&moveresult, 0, sizeof(moveresult));	/* IG: the planner's dodges (IG-40) */
 	else moveresult = BotAttackMove(bs, bs->tfl);
 	//if the movement failed
 	if (moveresult.failure) {

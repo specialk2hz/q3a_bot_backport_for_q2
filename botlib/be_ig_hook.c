@@ -641,6 +641,34 @@ void IG_AdjustGrappleCosts(void)
 static vec3_t ig_padend[MAX_CLIENTS];
 static float  ig_padseen[MAX_CLIENTS];
 
+/* The landing of the jump pad a bot is rising off (IG-40 pad flights in a
+ * fight, ai_ig_plan.c): the nearest TRAVEL_JUMPPAD route out of the jump-pad
+ * area at or up to 160 units below it. 1 and end, or 0 */
+int IG_PadLaunchEnd(const vec3_t origin, vec3_t end)
+{
+	int dz, a, i, best = 0;
+	float bd = 1e9f;
+
+	for (dz = 0; dz <= 160 && !best; dz += 16) {
+		vec3_t p;
+		aas_areasettings_t *s;
+		VectorCopy(origin, p); p[2] -= dz;
+		a = AAS_PointAreaNum(p);
+		if (!a || !(aasworld.areasettings[a].contents & AREACONTENTS_JUMPPAD)) continue;
+		s = &aasworld.areasettings[a];
+		for (i = 0; i < s->numreachableareas; i++) {
+			aas_reachability_t *r = &aasworld.reachability[s->firstreachablearea + i];
+			float d;
+			if ((r->traveltype & TRAVELTYPE_MASK) != TRAVEL_JUMPPAD) continue;
+			d = (r->start[0] - origin[0]) * (r->start[0] - origin[0]) + (r->start[1] - origin[1]) * (r->start[1] - origin[1]);
+			if (d < bd) { bd = d; best = s->firstreachablearea + i; }
+		}
+	}
+	if (!best) return 0;
+	VectorCopy(aasworld.reachability[best].end, end);
+	return 1;
+}
+
 void IG_NotePadFlight(int client, const vec3_t end)
 {
 	if (client < 0 || client >= MAX_CLIENTS) return;

@@ -1651,6 +1651,53 @@ static int IGX_FightFlight(bot_state_t *bs)
 	return 1;
 }
 
+/* IG-40: a pad flight in a fight (Billy, 2026-11-27: "bots are hitting the
+ * jump pads but steering away from the intended landing spot"). The fight
+ * node runs no travel, so the pad's air control never ran there and the
+ * stock attack dodge steered the flight: q2rdm11's twin pads, 16 fight
+ * matches, hook-free flights made the ledge 56% (the drill, no fight: 100%),
+ * the air steering 114 degrees off the landing on the misses. From the launch
+ * to the ground the fight's movement is the pad's own air control
+ * (BotAirControl, as BotFinishTravel_JumpPad steers it); the aim and the
+ * shots go on, and no fight hook starts (libvar ig_planpadfight, default 1).
+ * Out of a fight too (IG_Slingshot): a bot that runs over a pad on its way
+ * elsewhere is thrown off its route, and the route's own air control then
+ * steered at its goal, not the pad's landing -- the misses that remained. */
+static vec3_t igpf_end[MAX_CLIENTS];
+static float igpf_until[MAX_CLIENTS];
+int BotAirControl(vec3_t origin, vec3_t velocity, vec3_t goal, vec3_t dir, float *speed);
+
+int IG_PlanPadFightActive(int c)
+{
+	return c >= 0 && c < MAX_CLIENTS && FloatTime() < igpf_until[c];
+}
+
+int IG_PlanPadFightFlight(bot_state_t *bs)
+{
+	int c = bs->client;
+	vec3_t end, dir, o, v;
+	float speed;
+
+	if (!IG_PlanOn() || c < 0 || c >= MAX_CLIENTS || !LibVarValue("ig_planpadfight", "1")) return 0;
+	if (bs->cur_ps.groundEntityNum != ENTITYNUM_NONE || bs->cur_ps.pm_type != PM_NORMAL) { igpf_until[c] = 0; return 0; }
+	VectorCopy(bs->cur_ps.origin, o);
+	VectorCopy(bs->cur_ps.velocity, v);
+	if (IG_PadFlight(c, end)) { VectorCopy(end, igpf_end[c]); igpf_until[c] = FloatTime() + 3; }
+	else if (FloatTime() >= igpf_until[c]) {
+		if (v[2] < 300 || !IG_PadLaunchEnd(o, end)) return 0;	/* not rising off a pad */
+		VectorCopy(end, igpf_end[c]);
+		igpf_until[c] = FloatTime() + 3;
+		if (LibVarValue("ig_viewdebug", "0")) BotAI_Print(PRT_MESSAGE, "igpadsteer %d node %s end %.0f %.0f %.0f\n", c, igp_node[c], end[0], end[1], end[2]);
+	}
+	if (!BotAirControl(o, v, igpf_end[c], dir, &speed)) {
+		VectorSubtract(igpf_end[c], o, dir); dir[2] = 0;
+		VectorNormalize(dir);
+		speed = 400;
+	}
+	EA_Move(c, dir, speed);
+	return 1;
+}
+
 int IG_PlanFight(bot_state_t *bs)
 {
 	igx_t x;
