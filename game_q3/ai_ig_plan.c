@@ -58,8 +58,8 @@ void IG_PadDrillNoteTop(int client);
  * seconds, scaled by the bot's hook affinity (a grapple lover pays less):
  * libvar ig_planhookcost (s at the middle affinity, 0.55). */
 #define PLAN_COAST		15		/* up to 1.5 s more, running the route, until the extra speed is spent */
-#define PLAN_MAXANCH	16
-#define PLAN_MAXOPT		32
+#define PLAN_MAXANCH	36	/* IG-47: + 18 lip anchors (floor, ceiling) before a momentum jump */
+#define PLAN_MAXOPT		48	/* IG-47: room for the lip anchors' slingshots */
 
 enum { PO_RUN, PO_HOP, PO_SLING, PO_FIRE, PO_HOLD, PO_LETGO, PO_LETGOHOP, PO_HOLDHOP, PO_LANDHOP };
 static const char *po_names[] = { "run", "hop", "sling", "fire", "hold", "letgo", "letgohop", "holdhop", "landhop" };
@@ -101,6 +101,7 @@ typedef struct {
 	int			haslook;					/* IGX_LookAhead found a point to curve toward */
 	int			hasjump;					/* IG-47: a momentum jump ahead on the route (IGX_LookAhead) */
 	vec3_t		jumpfrom, jumpdir;			/* its take-off and its direction (level, unit) */
+	int			nearonly;					/* IGX_AnchorTry: only anchors short of the jump's edge */
 	float		turnahead;					/* the route's turn within a hop's reach, degrees */
 	vec3_t		look, lookfrom;
 } igx_t;
@@ -622,10 +623,10 @@ static void IGX_Simulate(igx_t *x, igopt_t *o)
 			/* IG-47 (Billy): before a momentum jump the hook is a slingshot -- let
 			 * go on this side and make the jump on the speed; still hooked past
 			 * the edge is a pull across, predictable: priced ig_fastjumphookacross
-			 * (off by default; 1 = 1 s) per 50 ms */
+			 * (1 s) per 50 ms, with the lip slingshots below the speed comes from */
 			if (x->hasjump && pm.hook && !pm.ground) {
 				vec3_t pa; VectorSubtract(pm.org, x->jumpfrom, pa); pa[2] = 0;
-				if (DotProduct(pa, x->jumpdir) > 0) wallpen += LibVarValue("ig_fastjumphookacross", "0");
+				if (DotProduct(pa, x->jumpdir) > 0) wallpen += LibVarValue("ig_fastjumphookacross", "1");
 			}
 		}
 		VectorCopy(in.view, x->lastview);	/* the game fires along this next think */
@@ -733,11 +734,11 @@ static void IGX_AnchorTry(igx_t *x, float pitch, float yaw, float mind, int cls)
 	/* a slingshot hooks the floor ahead, or a far wall: a wall at a
 	 * corridor's end or turn 400 units out was most of q2rdm4's "random
 	 * wall grapples" (575 of 898 slingshots there) */
-	if (cls == IGA_SLING && tr.plane.normal[2] <= 0.7f && VectorLength(d) < 600) return;
+	if (cls == IGA_SLING && tr.plane.normal[2] <= 0.7f && !(x->nearonly && tr.plane.normal[2] < -0.7f) && VectorLength(d) < 600) return;	/* IG-47: a lip ceiling is fine */
 	/* IG-47: a momentum jump ahead -- no hook past its take-off: the speed comes
 	 * from a slingshot on this side, let go before the edge, then the jump (Billy:
 	 * a pull straight across to the far wall is predictable) */
-	if (x->hasjump && LibVarValue("ig_fastjumpnoacross", "0")) {
+	if (x->hasjump && (x->nearonly || LibVarValue("ig_fastjumpnoacross", "0"))) {
 		vec3_t pa; VectorSubtract(tr.endpos, x->jumpfrom, pa); pa[2] = 0;
 		if (DotProduct(pa, x->jumpdir) > 0) return;
 	}
@@ -769,6 +770,23 @@ static void IGX_Anchors(igx_t *x, const vec3_t routedir)
 	for (i = -1; i <= 1; i += 2) {
 		IGX_AnchorTry(x, 8, baseyaw + 40 * i, 200, IGA_SIDE);
 		IGX_AnchorTry(x, -8, baseyaw + 40 * i, 200, IGA_SIDE);
+	}
+	/* IG-47, Billy's slingshot before a momentum jump (ztn2dm3, 5 tries
+	 * 2026-11-27): in the air at 110-290 u/s he hooks the floor at the very lip
+	 * of the ledge, 120-200 units out and 20-35 degrees down, holds 1-2 frames,
+	 * lets go short of the edge at 670-980 u/s and flies the gap. Or the same off
+	 * the ceiling above the lip: 10-16 degrees up, 180-270 units, let go at
+	 * 935-970 (4 tries). Steep floor and low ceiling anchors short of the edge,
+	 * only with a momentum jump ahead (ig_fastjumplip) */
+	if (x->hasjump && LibVarValue("ig_fastjumplip", "1")) {
+		static const float lippitch[3] = {20, 26, 32}, lipceil[3] = {-10, -14, -18};
+		x->nearonly = 1;
+		for (i = 0; i < 3; i++)
+			for (j = 0; j < 3; j++) {
+				IGX_AnchorTry(x, lippitch[j], baseyaw + slingyaw[i], 100, IGA_SLING);
+				IGX_AnchorTry(x, lipceil[j], baseyaw + slingyaw[i], 100, IGA_SLING);
+			}
+		x->nearonly = 0;
 	}
 }
 
