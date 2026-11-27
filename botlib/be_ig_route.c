@@ -52,10 +52,12 @@ static float IGR_Angle(const vec3_t a, const vec3_t b)
  * (the pad drill: 0 of 75 tries left the start). */
 static float igr_startmul = 1;
 
+float IG_LinkAreaFactor(int area);	/* be_ig_links.c, IG-49 */
 unsigned short int IG_StartLeg(int areanum, vec3_t origin, vec3_t end)
 {
 	unsigned short int t = AAS_AreaTravelTime(areanum, origin, end);
-	return igr_startmul < 1 ? (unsigned short int) (t * igr_startmul + 0.5f) : t;
+	float f = igr_startmul * IG_LinkAreaFactor(areanum);	/* IG-49: the area's measured speed too */
+	return f != 1 ? (unsigned short int) (t * f + 0.5f) : t;
 }
 
 void IG_RouteMomentum(void)

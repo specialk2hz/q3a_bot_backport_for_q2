@@ -1291,6 +1291,7 @@ void AAS_InitRouting(void)
 	//initialize the area travel times
 	AAS_CalculateAreaTravelTimes();
 	IG_RouteMomentum();	// IG: IG-46
+	{ void IG_LinksAtLoad(void); IG_LinksAtLoad(); }	// IG: IG-49, measured link times
 	//calculate the maximum travel times through portals
 	AAS_InitPortalMaxTravelTimes();
 	//get the areas reachabilities go through

@@ -4104,6 +4104,7 @@ void BotMoveToGoal(bot_moveresult_t *result, int movestate, bot_goal_t *goal, in
 	ms = BotMoveStateFromHandle(movestate);
 	if (!ms) return;
 	travelflags |= IG_FastJumpTfl(ms->client, ms->velocity);	// IG: IG-47, momentum jumps when fast
+	{ void IG_LinkObserve(int client, const vec3_t origin); IG_LinkObserve(ms->client, ms->origin); }	// IG: IG-49, link times log
 	//reset the grapple before testing if the bot has a valid goal
 	//because the bot could lose all its goals when stuck to a wall
 	BotResetGrapple(ms);
