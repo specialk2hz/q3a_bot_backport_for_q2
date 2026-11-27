@@ -3072,6 +3072,13 @@ bot_moveresult_t BotTravel_Grapple(bot_movestate_t *ms, aas_reachability_t *reac
 		{
 			EA_Attack(ms->client);
 		} //end if
+		/* IG-32: while the hook flies (not bitten yet), keep running toward the
+		 * anchor instead of standing still (Billy) */
+		if (IG_HookDetect() && (IG_ClimbRun() & 1) && state == 1 && (ms->moveflags & MFL_ONGROUND)) {
+			vec3_t rd;
+			VectorSubtract(reach->end, ms->origin, rd); rd[2] = 0;
+			if (VectorNormalize(rd) > 32) EA_Move(ms->client, rd, 400);
+		}
 		//remember the current grapple distance
 		ms->lastgrappledist = dist;
 		/* IG-36: look where it is going -- at the landing, level -- not around
@@ -3104,7 +3111,7 @@ bot_moveresult_t BotTravel_Grapple(bot_movestate_t *ms, aas_reachability_t *reac
 		if ((dist < 5 &&
 			fabs(AngleDiff(result.ideal_viewangles[0], ms->viewangles[0])) < 2 &&
 			fabs(AngleDiff(result.ideal_viewangles[1], ms->viewangles[1])) < 2) ||
-			(IG_HookDetect() && IG_ClimbFireNow(ms->origin, ms->viewoffset, ms->viewangles, reach->start, viewdir, ms->entitynum))) /* IG: IG-32 */
+			(IG_HookDetect() && IG_ClimbFireNow(ms->origin, ms->viewoffset, ms->viewangles, reach->start, viewdir, ms->entitynum, sqrt(ms->velocity[0] * ms->velocity[0] + ms->velocity[1] * ms->velocity[1])))) /* IG: IG-32 */
 		{
 #ifdef DEBUG_GRAPPLE
 			botimport.Print(PRT_MESSAGE, "BotTravel_Grapple: activating grapple\n");
@@ -3137,7 +3144,16 @@ bot_moveresult_t BotTravel_Grapple(bot_movestate_t *ms, aas_reachability_t *reac
 		{
 			if (dist < 70) speed = 300 - (300 - 4 * dist);
 			else speed = 400;
-			if (IG_HookDetect() && (IG_ClimbRun() & 1)) speed = 400; /* IG: IG-32, run in */
+			/* IG: IG-32, run in -- past the start too, along the line to the
+			 * anchor -- once the aim is nearly there (15 degrees); turning still,
+			 * the stock approach: slow to the start and fire there (running in
+			 * unaimed lost a third to two thirds of the climbs) */
+			if (IG_HookDetect() && (IG_ClimbRun() & 1) &&
+				fabs(AngleDiff(result.ideal_viewangles[0], ms->viewangles[0])) < 15 &&
+				fabs(AngleDiff(result.ideal_viewangles[1], ms->viewangles[1])) < 15) {
+				speed = 400;
+				if (IG_ClimbRunWindow(ms->origin, reach->start, viewdir, sqrt(ms->velocity[0] * ms->velocity[0] + ms->velocity[1] * ms->velocity[1]))) { dir[0] = viewdir[0]; dir[1] = viewdir[1]; dir[2] = 0; VectorNormalize(dir); }
+			}
 			//
 			BotCheckBlocked(ms, dir, true, &result);
 			//elemantary action move in direction
@@ -3146,7 +3162,8 @@ bot_moveresult_t BotTravel_Grapple(bot_movestate_t *ms, aas_reachability_t *reac
 		} //end else
 		//if in another area before actually grappling
 		areanum = AAS_PointAreaNum(ms->origin);
-		if (areanum && areanum != ms->reachareanum) ms->reachability_time = 0;
+		if (areanum && areanum != ms->reachareanum &&
+			!(IG_HookDetect() && (IG_ClimbRun() & 1) && IG_ClimbRunWindow(ms->origin, reach->start, viewdir, sqrt(ms->velocity[0] * ms->velocity[0] + ms->velocity[1] * ms->velocity[1])))) ms->reachability_time = 0; /* IG: IG-32, the run-in window keeps the climb */
 	} //end else
 	return result;
 } //end of the function BotTravel_Grapple

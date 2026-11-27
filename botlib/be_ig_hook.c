@@ -359,16 +359,44 @@ int IG_ClimbRun(void)
 	return (int) LibVarValue("ig_climbrun", "0");
 }
 
-int IG_ClimbFireNow(const vec3_t origin, const vec3_t viewoffset, const vec3_t viewangles, const vec3_t start, const vec3_t aimdir, int passent)
+/* IG-32 (2026-11-27, Billy: bots "completely stop moving and grapple and pull
+ * to move when a seasoned player would be moving in the direction that they
+ * want to grapple"): the run-in window -- within IG_RUN_FIRE of the route's
+ * start, or up to IG_RUN_PAST beyond it along the way to the anchor and
+ * within IG_RUN_SIDE of that line. A bot running in fires anywhere in it, and
+ * keeps the climb route while it is in it (it used to drop the route the
+ * moment the run took it into the next area: a third fewer climbs). */
+#define IG_RUN_PAST  160
+#define IG_RUN_SIDE  48
+#define IG_RUN_EARLY 200
+int IG_ClimbRunWindow(const vec3_t origin, const vec3_t start, const vec3_t aimdir, float speed)
+{
+	vec3_t d, a;
+	float along, side, early, fly = LibVarValue("ig_hookfly", "1600");
+
+	VectorSubtract(origin, start, d); d[2] = 0;
+	if (VectorLength(d) <= IG_RUN_FIRE) return 1;
+	VectorCopy(aimdir, a); a[2] = 0;
+	if (VectorNormalize(a) < 1) return 0;
+	along = DotProduct(d, a);
+	side = fabs(d[0] * a[1] - d[1] * a[0]);
+	/* Billy: with a slow hook (LMCTF) he prefires, the hook's flight in
+	 * hand: the window opens as far before the start as the bot runs while
+	 * the hook flies to the anchor (at most IG_RUN_EARLY) */
+	early = fly > 100 ? speed * VectorLength(aimdir) / fly : 0;
+	if (early < IG_RUN_FIRE) early = IG_RUN_FIRE;
+	if (early > IG_RUN_EARLY) early = IG_RUN_EARLY;
+	return along >= -early && along <= IG_RUN_PAST && side <= IG_RUN_SIDE;
+}
+
+int IG_ClimbFireNow(const vec3_t origin, const vec3_t viewoffset, const vec3_t viewangles, const vec3_t start, const vec3_t aimdir, int passent, float speed)
 {
 	vec3_t d, ideal, eye, end;
 	aas_trace_t trace;
 	float len, tol;
 
 	if (!(IG_ClimbRun() & 1)) return 0;
-	VectorSubtract(start, origin, d);
-	d[2] = 0;
-	if (VectorLength(d) > IG_RUN_FIRE) return 0;
+	if (!IG_ClimbRunWindow(origin, start, aimdir, speed)) return 0;
 	/* the hook must land within IG_RUN_MISS of the aim point, or the pull
 	 * takes another line: about 3 degrees at a usual 300 units */
 	len = VectorLength(aimdir);

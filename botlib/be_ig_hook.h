@@ -21,11 +21,12 @@ int IG_CanFireHook(int client);
 float IG_GrappleStartDist(float dist);
 /* IG-32 (libvar ig_climbrun): climbs fired on the run, let go at the top */
 int IG_ClimbRun(void);
-int IG_ClimbFireNow(const vec3_t origin, const vec3_t viewoffset, const vec3_t viewangles, const vec3_t start, const vec3_t aimdir, int passent);
+int IG_ClimbFireNow(const vec3_t origin, const vec3_t viewoffset, const vec3_t viewangles, const vec3_t start, const vec3_t aimdir, int passent, float speed);
 int IG_ClimbLetGo(const vec3_t origin, const struct aas_reachability_s *reach);
 void IG_NotePadFlight(int client, const vec3_t end);
 int IG_PadFlight(int client, vec3_t end);
 int IG_PadLaunchEnd(const vec3_t origin, vec3_t end);
+int IG_ClimbRunWindow(const vec3_t origin, const vec3_t start, const vec3_t aimdir, float speed);
 void IG_NotePadApproach(int client, const vec3_t start, const vec3_t end);	/* IG-40 pad view */
 int IG_PadApproach2(int client, vec3_t start, vec3_t end);
 void IG_PadReachAtLoad(void);	/* IG-43 */
