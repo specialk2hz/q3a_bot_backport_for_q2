@@ -26,6 +26,9 @@ int IG_ClimbLetGo(const vec3_t origin, const struct aas_reachability_s *reach);
 void IG_NotePadFlight(int client, const vec3_t end);
 int IG_PadFlight(int client, vec3_t end);
 int IG_PadLaunchEnd(const vec3_t origin, vec3_t end);
+int IG_ClimbAnchorList(int reachnum, const struct aas_reachability_s *reach, vec3_t out[3]);
+void IG_PlanClimbNote(int client, int reachnum);
+int IG_PlanClimbOwns(int client, int reachnum);
 int IG_ClimbRunWindow(const vec3_t origin, const vec3_t start, const vec3_t aimdir, float speed);
 void IG_NotePadApproach(int client, const vec3_t start, const vec3_t end);	/* IG-40 pad view */
 int IG_PadApproach2(int client, vec3_t start, vec3_t end);

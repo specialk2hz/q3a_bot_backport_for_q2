@@ -2990,6 +2990,8 @@ bot_moveresult_t BotTravel_Grapple(bot_movestate_t *ms, aas_reachability_t *reac
 	int ig_mine = 0;
 
 	IG_GrappleTravelNote(ms->client); /* IG: the hook watchdog (IG-6) */
+	/* IG: IG-40 -- the planner climbs this route itself (ig_planclimb): no stock move, aim or fire meanwhile */
+	if (IG_HookDetect() && !(ms->moveflags & MFL_ACTIVEGRAPPLE) && IG_PlanClimbOwns(ms->client, ms->lastreachnum)) return result;
 	if (IG_HookDetect()) ig_mine = IG_ClimbAimReach(ms->client, ms->lastreachnum, reach, &ig_reach); /* IG: IG-36, 1 frame anchor, 2 landing only */
 	if (ig_mine == 1) reach = &ig_reach;
 #ifdef DEBUG_GRAPPLE

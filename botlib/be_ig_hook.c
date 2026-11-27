@@ -1243,6 +1243,39 @@ int IG_ClimbAimReach(int client, int reachnum, const aas_reachability_t *reach, 
 	return 1;
 }
 
+/* Climbs in the planner (IG-40, libvar ig_planclimb; BOT-TRICKS T9): the
+ * anchors a climb route can be hooked at, no side effects -- bspc's, and the
+ * climb table's frame and landing floor (IG-36) when it has them. The planner
+ * simulates a slingshot to each from where the bot is, moving. Returns the count. */
+int IG_ClimbAnchorList(int reachnum, const aas_reachability_t *reach, vec3_t out[3])
+{
+	ig_climbaim_t *ca;
+	int n = 0;
+
+	VectorCopy(reach->end, out[n]); n++;
+	if (!IG_ClimbAimFor(-1)) return n;
+	ca = IG_ClimbAimGet(reachnum, reach);
+	if (!ca || ca->usebspc) return n;
+	if (ca->hasframe) { VectorCopy(ca->frame, out[n]); n++; }
+	if (ca->hasfloor) { VectorCopy(ca->floor, out[n]); n++; }
+	return n;
+}
+
+/* ...and while the planner owns a climb (it noted it this think or the last),
+ * the stock grapple travel stands down unless its own hook is out */
+static float ig_planclimbt[MAX_CLIENTS];
+static int ig_planclimbr[MAX_CLIENTS];
+void IG_PlanClimbNote(int client, int reachnum)
+{
+	if (client < 0 || client >= MAX_CLIENTS) return;
+	ig_planclimbt[client] = AAS_Time(); ig_planclimbr[client] = reachnum;
+}
+int IG_PlanClimbOwns(int client, int reachnum)
+{
+	if (client < 0 || client >= MAX_CLIENTS) return 0;
+	return ig_planclimbr[client] == reachnum && AAS_Time() - ig_planclimbt[client] < 0.25f && AAS_Time() >= ig_planclimbt[client];
+}
+
 /* IG-37: what this climb hooks: -1 bspc's anchor, 0 the frame, 1 the floor */
 int IG_ClimbAimPick(int client, int reachnum)
 {

@@ -102,6 +102,9 @@ typedef struct {
 	int			hasjump;					/* IG-47: a momentum jump ahead on the route (IGX_LookAhead) */
 	vec3_t		jumpfrom, jumpdir;			/* its take-off and its direction (level, unit) */
 	int			nearonly;					/* IGX_AnchorTry: only anchors short of the jump's edge */
+	int			climbrn;					/* IG-40 climbs: a grapple route ahead the planner climbs itself */
+	int			nclimb;
+	vec3_t		climbanch[3];				/* its anchors (bspc's, the climb table's frame and floor) */
 	float		turnahead;					/* the route's turn within a hop's reach, degrees */
 	vec3_t		look, lookfrom;
 } igx_t;
@@ -203,7 +206,8 @@ static int IGX_RouteDirS(igx_t *x, const vec3_t org, int area, vec3_t dir, int *
 		if (!AAS_AreaRouteToGoalArea(area, o, x->goalarea, x->tfl, &tt, &rn) || !rn) return 0;
 		AAS_ReachabilityFromNum(rn, &r);
 		tv = r.traveltype & TRAVELTYPE_MASK;
-		if (special && tv != TRAVEL_WALK && tv != TRAVEL_WALKOFFLEDGE && tv != TRAVEL_STRAFEJUMP) *special = 1;	/* IG-47: momentum jumps are flown by the sim */
+		if (special && tv != TRAVEL_WALK && tv != TRAVEL_WALKOFFLEDGE && tv != TRAVEL_STRAFEJUMP &&
+			!(tv == TRAVEL_GRAPPLEHOOK && x->climbrn)) *special = 1;	/* IG-47: momentum jumps are flown by the sim; IG-40: so are the planner's climbs */
 		VectorCopy(r.start, t);
 		/* at the reachability's start already: head across it. A momentum jump
 		 * (IG-47) heads for its landing at once: the sim flies it from wherever
@@ -270,6 +274,51 @@ static void IGX_JumpKeep(igx_t *x)
 		x->hasjump = 1;
 		VectorCopy(igp_state[c].jumpfrom, x->jumpfrom);
 		VectorCopy(igp_state[c].jumpdir, x->jumpdir);
+	}
+}
+
+/* IG-40 climbs (libvar ig_planclimb; BOT-TRICKS T9). Billy: bots "completely
+ * stop moving and grapple and pull to move when a seasoned player would be
+ * moving in the direction that they want to grapple", and with a slow hook he
+ * prefires. The stock grapple travel walks to the route's start, stops, aims,
+ * fires (71% of climbs from a standstill); loosened it lost climbs (IG-32).
+ * Here a grapple route within ig_planclimbdist (600) along the route is the
+ * planner's: its anchors become slingshot targets, simulated from where the
+ * bot is, moving, with the hook's own flight (a slow hook fires earlier) and
+ * pull; replanning while hooked lets go when the sim says. The stock travel
+ * stands down while the planner notes it (IG_PlanClimbOwns); after
+ * ig_planclimbgive (3) s on one climb without firing, it is the stock's. */
+static int igpc_rn[MAX_CLIENTS], igpc_fired[MAX_CLIENTS];
+static float igpc_since[MAX_CLIENTS];
+static void IGX_FindClimb(igx_t *x, const vec3_t org)
+{
+	int c = x->bs->client, k, ar, tt, rn;
+	float dist = 0, maxd;
+	vec3_t o;
+	aas_reachability_t r;
+
+	x->climbrn = 0; x->nclimb = 0;
+	if (!x->canfire || !LibVarValue("ig_planclimb", "0") || c < 0 || c >= MAX_CLIENTS || !x->goalarea) return;
+	/* not yet with LMCTF's hook: 28 maps, hooks that climbed -2.7 pts (its pull is misjudged) */
+	if (LibVarValue("ig_hookstyle", "0") && !LibVarValue("ig_planclimblmctf", "0")) return;
+	maxd = LibVarValue("ig_planclimbdist", "600");
+	VectorCopy(org, o);
+	ar = AAS_PointAreaNum(o);
+	for (k = 0; k < 6 && ar && ar != x->goalarea && dist < maxd; k++) {
+		if (!AAS_AreaRouteToGoalArea(ar, o, x->goalarea, x->tfl, &tt, &rn) || !rn) return;
+		AAS_ReachabilityFromNum(rn, &r);
+		if ((r.traveltype & TRAVELTYPE_MASK) == TRAVEL_GRAPPLEHOOK) {
+			if (igpc_rn[c] != rn) { igpc_rn[c] = rn; igpc_since[c] = FloatTime(); igpc_fired[c] = 0; }
+			if (!igpc_fired[c] && FloatTime() - igpc_since[c] > LibVarValue("ig_planclimbgive", "3")) return;	/* the stock's */
+			x->climbrn = rn;
+			x->nclimb = IG_ClimbAnchorList(rn, &r, x->climbanch);
+			IG_PlanClimbNote(c, rn);
+			return;
+		}
+		if ((r.traveltype & TRAVELTYPE_MASK) != TRAVEL_WALK) return;
+		dist += Distance(o, r.end);
+		VectorCopy(r.end, o);
+		ar = r.areanum;
 	}
 }
 
@@ -712,8 +761,8 @@ static void IGX_Simulate(igx_t *x, igopt_t *o)
  *              units: the stairwell and ledge hook (T6); x ig_planupmul (1)
  *   IGA_SIDE   40 degrees off the route: a turn around a corner, worth it only
  *              when it clearly pays; x ig_plansidemul (2) */
-enum { IGA_SLING, IGA_UP, IGA_SIDE, IGA_PADTOP };
-static const char *iga_names[] = { "sling", "up", "side", "padtop" };
+enum { IGA_SLING, IGA_UP, IGA_SIDE, IGA_PADTOP, IGA_CLIMB };
+static const char *iga_names[] = { "sling", "up", "side", "padtop", "climb" };
 
 static void IGX_AnchorTry(igx_t *x, float pitch, float yaw, float mind, int cls)
 {
@@ -771,6 +820,16 @@ static void IGX_Anchors(igx_t *x, const vec3_t routedir)
 		IGX_AnchorTry(x, 8, baseyaw + 40 * i, 200, IGA_SIDE);
 		IGX_AnchorTry(x, -8, baseyaw + 40 * i, 200, IGA_SIDE);
 	}
+	/* IG-40 climbs (BOT-TRICKS T9): the climb route's own anchors, hooked from
+	 * wherever the bot is -- running, as Billy does -- the sim proves the pull */
+	for (i = 0; i < x->nclimb && x->numanchors < PLAN_MAXANCH; i++) {
+		vec3_t d, ang;
+		int before = x->numanchors;
+		VectorSubtract(x->climbanch[i], x->bs->eye, d);
+		vectoangles(d, ang);
+		IGX_AnchorTry(x, ang[PITCH], ang[YAW], 48, IGA_CLIMB);
+		if (x->numanchors > before && Distance(x->anchors[before], x->climbanch[i]) > 32) x->numanchors = before;	/* the hook would bite elsewhere */
+	}
 	/* IG-47, Billy's slingshot before a momentum jump (ztn2dm3, 5 tries
 	 * 2026-11-27): in the air at 110-290 u/s he hooks the floor at the very lip
 	 * of the ledge, 120-200 units out and 20-35 degrees down, holds 1-2 frames,
@@ -819,6 +878,7 @@ static void IGX_PadAnchors(igx_t *x, const vec3_t routedir, const vec3_t toland,
 static float IGX_ClassMul(int cls)
 {
 	if (cls == IGA_PADTOP) return LibVarValue("ig_planpadmul", "0.3");
+	if (cls == IGA_CLIMB) return LibVarValue("ig_planclimbmul", "0.2");
 	return cls == IGA_SLING ? LibVarValue("ig_planslingmul", "0.3") :
 		   cls == IGA_UP ? LibVarValue("ig_planupmul", "1") : LibVarValue("ig_plansidemul", "2");
 }
@@ -954,8 +1014,11 @@ int IG_Plan(bot_state_t *bs, bot_goal_t *goal, bot_moveresult_t *mr)
 	if (ground) igp_state[c].landhop = 0;
 	if (ground) igp_state[c].padfired = 0;
 
+	/* IG-40 climbs: a grapple route within reach on the route, climbed by the planner */
+	IGX_FindClimb(&x, bs->origin);
 	/* what the planner does not plan: the stock movement's */
-	if (!igp_padmode && !ours && ((mr->traveltype & TRAVELTYPE_MASK) != TRAVEL_WALK ||
+	if (!igp_padmode && !ours && (((mr->traveltype & TRAVELTYPE_MASK) != TRAVEL_WALK &&
+								   !(x.climbrn && (mr->traveltype & TRAVELTYPE_MASK) == TRAVEL_GRAPPLEHOOK)) ||
 				  (mr->flags & (MOVERESULT_MOVEMENTVIEWSET | MOVERESULT_WAITING | MOVERESULT_ONTOPOFOBSTACLE)))) {
 		if (trap_Cvar_VariableIntegerValue("ig_plandebug") == 2)
 			BotAI_Print(PRT_MESSAGE, "igret %d stock travel %d flags %d ground %d speed %.0f\n", c, mr->traveltype & TRAVELTYPE_MASK, mr->flags, ground, IGX_HSpeed(bs));
@@ -1197,6 +1260,7 @@ int IG_Plan(bot_state_t *bs, bot_goal_t *goal, bot_moveresult_t *mr)
 
 			trap_EA_Command(c, LibVarGetString("cmd_grappleon"));
 			IG_NoteHookFire(c);
+			if (igp_state[c].anchorclass == IGA_CLIMB) igpc_fired[c] = 1;	/* IG-40 climbs */
 			IG_GrappleTravelNote(c);
 			igp_state[c].hookout = 1;
 			if (igp_padmode) { igp_state[c].padfired = 1; IG_PadDrillNoteTop(c); }
