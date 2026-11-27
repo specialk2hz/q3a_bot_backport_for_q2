@@ -633,7 +633,7 @@ static void IGX_Simulate(igx_t *x, igopt_t *o)
 		if (pm.everhit & (CONTENTS_LAVA | CONTENTS_SLIME)) return;	/* out */
 		VectorSet(vh, pm.vel[0], pm.vel[1], 0);
 		after = VectorLength(vh);
-		if (pm.blocked && before - after > 200) { wallpen += 0.15f * (before - after) / 300 * LibVarValue("ig_planwallmul", "1") * (x->released ? LibVarValue("ig_planreleasewallmul", "3") : 1); if (t < LibVarValue("ig_planwallsoon", "4")) o->wallhit = 1; }
+		if (pm.blocked && before - after > 200) { wallpen += 0.15f * (before - after) / 300 * LibVarValue("ig_planwallmul", "1") * (x->released ? LibVarValue("ig_planreleasewallmul", "1.5") : 1); if (t < LibVarValue("ig_planwallsoon", "2")) o->wallhit = 1; }
 		flow += after;
 		flown++;
 		if (pm.pad || pm.teleport) break;	/* the navigation file knows where those go */
@@ -668,7 +668,7 @@ static void IGX_Simulate(igx_t *x, igopt_t *o)
 			if (pm.everhit & (CONTENTS_LAVA | CONTENTS_SLIME)) return;
 			VectorSet(vh, pm.vel[0], pm.vel[1], 0);
 			after = VectorLength(vh);
-			if (pm.blocked && before - after > 200) { wallpen += 0.15f * (before - after) / 300 * LibVarValue("ig_planwallmul", "1") * (x->released ? LibVarValue("ig_planreleasewallmul", "3") : 1); }
+			if (pm.blocked && before - after > 200) { wallpen += 0.15f * (before - after) / 300 * LibVarValue("ig_planwallmul", "1") * (x->released ? LibVarValue("ig_planreleasewallmul", "1.5") : 1); }
 			if (pm.pad || pm.teleport) break;
 		}
 	}
@@ -882,10 +882,10 @@ int IG_Plan(bot_state_t *bs, bot_goal_t *goal, bot_moveresult_t *mr)
 	VectorCopy(goal->origin, x.goalorg);
 	x.tfl = bs->tfl | IG_FastJumpTfl(bs->client, bs->cur_ps.velocity);	/* IG-47 */
 	/* IG-47: the planner plans with momentum jumps from ig_fastjumpplan u/s
-	 * (default: only when the route has them), so it builds the speed toward
+	 * (250, Billy's ztn2dm3 ledge: 0 = only when the route has them), so it builds the speed toward
 	 * one coming up; its simulation proves the jump or rules it out */
-	if (LibVarValue("ig_fastjumps", "0") && LibVarValue("ig_fastjumpplan", "0") > 0 &&
-		sqrt(bs->cur_ps.velocity[0] * bs->cur_ps.velocity[0] + bs->cur_ps.velocity[1] * bs->cur_ps.velocity[1]) >= LibVarValue("ig_fastjumpplan", "0"))
+	if (LibVarValue("ig_fastjumps", "0") && LibVarValue("ig_fastjumpplan", "250") > 0 &&
+		sqrt(bs->cur_ps.velocity[0] * bs->cur_ps.velocity[0] + bs->cur_ps.velocity[1] * bs->cur_ps.velocity[1]) >= LibVarValue("ig_fastjumpplan", "250"))
 		x.tfl |= TFL_STRAFEJUMP;
 	if (trap_Cvar_VariableIntegerValue("ig_plandebug") == 2) {
 		vec3_t o2; int a2;
@@ -1777,7 +1777,7 @@ int IG_PlanFight(bot_state_t *bs)
 	return 1;
 }
 
-/* IG-40 pad top (libvar ig_planpadsling, default 0): in a jump pad's flight,
+/* IG-40 pad top (libvar ig_planpadsling, default 1 since ig-0.5): in a jump pad's flight,
  * the planner may slingshot from the top of the arc along the route past the
  * landing (IGX_PadAnchors); riding the pad on is its "run". Returns as IG_Plan:
  * 0 leaves the flight to the stock pad steering. */
@@ -1785,7 +1785,7 @@ int IG_PlanPadTop(bot_state_t *bs, bot_goal_t *goal, bot_moveresult_t *mr)
 {
 	int r;
 
-	if (!IG_PlanOn() || !LibVarValue("ig_planpadsling", "0") || bs->client < 0 || bs->client >= MAX_CLIENTS) return 0;
+	if (!IG_PlanOn() || !LibVarValue("ig_planpadsling", "1") || bs->client < 0 || bs->client >= MAX_CLIENTS) return 0;
 	if (!IG_PadFlight(bs->client, igp_padland)) return 0;
 	{ bot_goal_t *dg = IG_PadDrillGoal(bs->client); if (dg) goal = dg; }	/* IG-43's pad drill */
 	igp_padmode = 1;
@@ -1818,7 +1818,7 @@ int IG_PlanPadOver(bot_state_t *bs)
 
 int IG_PlanPadSlingOn(void)
 {
-	return IG_PlanOn() && LibVarValue("ig_planpadsling", "0") != 0;
+	return IG_PlanOn() && LibVarValue("ig_planpadsling", "1") != 0;
 }
 
 /* The view in a jump pad's flight (libvar ig_planpadview, default 1, with the
