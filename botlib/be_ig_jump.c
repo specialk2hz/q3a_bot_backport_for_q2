@@ -46,10 +46,27 @@ static int igfj_on[MAX_CLIENTS];
 static float igfj_onspd = 500, igfj_offspd = 380;
 static int igfj_enabled;
 
+/* Variety (Billy, 2026-11-28: "try to make it 50/50 lip grapple and strafe
+ * jumping stairs"): every ig_fastjumproll (8) s a bot rolls whether it takes
+ * momentum jumps for a while, at ig_fastjumpchance (0.5) */
+static float igfj_rolled[MAX_CLIENTS];
+static int igfj_take[MAX_CLIENTS];
+int IG_FastJumpAllowed(int client)
+{
+	float now = AAS_Time();
+	if (!igfj_enabled || client < 0 || client >= MAX_CLIENTS) return 0;
+	if (now < igfj_rolled[client] || now - igfj_rolled[client] > LibVarValue("ig_fastjumproll", "8")) {
+		igfj_rolled[client] = now;
+		igfj_take[client] = random() < LibVarValue("ig_fastjumpchance", "0.5");
+	}
+	return igfj_take[client];
+}
+
 int IG_FastJumpTfl(int client, const vec3_t vel)
 {
 	float s;
 	if (!igfj_enabled || client < 0 || client >= MAX_CLIENTS) return 0;
+	if (!IG_FastJumpAllowed(client)) return 0;
 	s = sqrt(vel[0] * vel[0] + vel[1] * vel[1]);
 	if (s >= igfj_onspd) igfj_on[client] = 1;
 	else if (s < igfj_offspd) igfj_on[client] = 0;

@@ -86,6 +86,7 @@ typedef struct {
 	vec3_t		anchors[PLAN_MAXANCH];
 	vec3_t		anchorview[PLAN_MAXANCH];	/* pitch, yaw from the eye now */
 	int			anchorclass[PLAN_MAXANCH];	/* IGA_SLING, IGA_UP, IGA_SIDE */
+	int			anchorlip[PLAN_MAXANCH];	/* IG-47: a lip anchor short of a momentum jump's edge */
 	float		anchornz[PLAN_MAXANCH];		/* the surface's normal z: > 0.7 floor */
 	bot_goal_t	*goal;
 	int			numanchors;
@@ -137,6 +138,7 @@ static struct {
 	int		ret, setmove, jump;
 	vec3_t	wish, view;
 	/* IG-47: the last momentum jump seen ahead, kept through its flight */
+	float	firetime;		/* our hook's fire, for the commit to it (ig_planhookcommit) */
 	float	jumpuntil;
 	vec3_t	jumpfrom, jumpdir, jumpto;
 } igp_state[MAX_CLIENTS];
@@ -178,6 +180,7 @@ void IG_PlanTick(bot_state_t *bs)
 /* ---------------------------------------------------------------- route */
 
 int IG_FastJumpTfl(int client, const vec3_t vel);	/* be_ig_jump.c, IG-47 */
+int IG_FastJumpAllowed(int client);	/* be_ig_jump.c, IG-47: this bot's roll */
 
 /* The route's way from org. *special: the route's next step there is one
  * the simulation does not model -- a gap jump, a barrier jump, a ladder, a
@@ -906,6 +909,7 @@ static void IGX_AnchorTry(igx_t *x, float pitch, float yaw, float mind, int cls)
 	vectoangles(d, x->anchorview[x->numanchors]);
 	if (x->anchorview[x->numanchors][PITCH] > 180) x->anchorview[x->numanchors][PITCH] -= 360;
 	x->anchorclass[x->numanchors] = cls;
+	x->anchorlip[x->numanchors] = x->nearonly;
 	x->anchornz[x->numanchors] = tr.plane.normal[2];
 	x->numanchors++;
 }
@@ -916,7 +920,7 @@ static void IGX_AnchorTry(igx_t *x, float pitch, float yaw, float mind, int cls)
  * the hook grazed past it: 134 of 189 fired at nothing.) */
 static void IGX_LipOnLine(igx_t *x, const vec3_t target)
 {
-	static const float lippitch[3] = {20, 26, 32}, lipceil[3] = {-10, -14, -18};
+	static const float lippitch[5] = {14, 17, 20, 26, 32}, lipceil[3] = {-10, -14, -18};
 	vec3_t dir;
 	float yaw;
 	int j;
@@ -925,10 +929,8 @@ static void IGX_LipOnLine(igx_t *x, const vec3_t target)
 	if (VectorNormalize(dir) <= 64) return;
 	yaw = atan2(dir[1], dir[0]) * 180 / M_PI;
 	x->nearonly = 1;
-	for (j = 0; j < 3; j++) {
-		IGX_AnchorTry(x, lippitch[j], yaw, 100, IGA_SLING);
-		IGX_AnchorTry(x, lipceil[j], yaw, 100, IGA_SLING);
-	}
+	for (j = 0; j < 5; j++) IGX_AnchorTry(x, lippitch[j], yaw, 100, IGA_SLING);
+	for (j = 0; j < 3; j++) IGX_AnchorTry(x, lipceil[j], yaw, 100, IGA_SLING);
 	x->nearonly = 0;
 }
 
@@ -1083,7 +1085,7 @@ int IG_Plan(bot_state_t *bs, bot_goal_t *goal, bot_moveresult_t *mr)
 	/* IG-47: the planner plans with momentum jumps from ig_fastjumpplan u/s
 	 * (250, Billy's ztn2dm3 ledge: 0 = only when the route has them), so it builds the speed toward
 	 * one coming up; its simulation proves the jump or rules it out */
-	if (LibVarValue("ig_fastjumps", "0") && LibVarValue("ig_fastjumpplan", "250") > 0 &&
+	if (LibVarValue("ig_fastjumps", "0") && LibVarValue("ig_fastjumpplan", "250") > 0 && IG_FastJumpAllowed(bs->client) &&
 		sqrt(bs->cur_ps.velocity[0] * bs->cur_ps.velocity[0] + bs->cur_ps.velocity[1] * bs->cur_ps.velocity[1]) >= LibVarValue("ig_fastjumpplan", "250"))
 		x.tfl |= TFL_STRAFEJUMP;
 	if (trap_Cvar_VariableIntegerValue("ig_plandebug") == 2) {
@@ -1199,9 +1201,16 @@ int IG_Plan(bot_state_t *bs, bot_goal_t *goal, bot_moveresult_t *mr)
 #define OPT(K, H, J0, A, F, R, L) do { if (n < PLAN_MAXOPT) { igopt_t *o_ = &opts[n++]; o_->kind = K; o_->hop = H; o_->hookmul = 1; o_->landhop = 0; o_->wallhit = 0; \
 	o_->jump0 = J0; o_->anchor = A; o_->fire = F; o_->relafter = R; o_->letgo = L; } } while (0)
 	if (x.hook) {
-		OPT(PO_LETGO, 0, 0, -1, -1, 0, 1);
-		{ OPT(PO_LANDHOP, 0, 0, -1, -1, 0, 1); opts[n - 1].landhop = 1; }	/* let go, hop the landing */
-		OPT(PO_LETGOHOP, 1, 0, -1, -1, 0, 1);
+		/* a hook of ours still flying, just fired: held until it bites (Billy
+		 * commits; the bots let go of 40% of their lip slingshots before the
+		 * bite, the hook wasted) -- unless every hold is bad (below: best < 0) */
+		int committed = x.hook == 1 && igp_state[c].hookout &&
+						FloatTime() - igp_state[c].firetime < LibVarValue("ig_planhookcommit", "0.4") && FloatTime() >= igp_state[c].firetime;
+		if (!committed) {
+			OPT(PO_LETGO, 0, 0, -1, -1, 0, 1);
+			{ OPT(PO_LANDHOP, 0, 0, -1, -1, 0, 1); opts[n - 1].landhop = 1; }	/* let go, hop the landing */
+			OPT(PO_LETGOHOP, 1, 0, -1, -1, 0, 1);
+		}
 		for (k = 1; k <= 4; k++) OPT(PO_HOLD, 0, 0, -1, -1, k * k == 16 ? 8 : k, 0);	/* 1, 2, 3, 8 thinks */
 		/* T3, the pull hop: hop off the floor while the hook drags (friction eats the pull) */
 		if (ground) for (k = 2; k <= 3; k++) OPT(PO_HOLDHOP, 1, 0, -1, -1, k, 0);
@@ -1230,8 +1239,12 @@ int IG_Plan(bot_state_t *bs, bot_goal_t *goal, bot_moveresult_t *mr)
 			}
 		} else if (x.canfire) {
 			IGX_Anchors(&x, routedir);
-			for (i = 0; i < x.numanchors; i++)
-				{ OPT(PO_SLING, 0, ground, i, 1, 3, 0); opts[n - 1].hookmul = IGX_ClassMul(x.anchorclass[i]); opts[n - 1].landhop = x.slinghop; }
+			for (i = 0; i < x.numanchors; i++) {
+				OPT(PO_SLING, 0, ground, i, 1, 3, 0); opts[n - 1].hookmul = IGX_ClassMul(x.anchorclass[i]); opts[n - 1].landhop = x.slinghop;
+				/* IG-47, Billy's lip slingshot (ztn2dm3, 2026-11-28): a bite held
+				 * one frame, let go at 943 u/s 130 units short of the anchor */
+				if (x.anchorlip[i]) { OPT(PO_SLING, 0, ground, i, 1, 1, 0); opts[n - 1].hookmul = IGX_ClassMul(x.anchorclass[i]); opts[n - 1].landhop = x.slinghop; }
+			}
 		}
 	}
 #undef OPT
@@ -1410,6 +1423,7 @@ int IG_Plan(bot_state_t *bs, bot_goal_t *goal, bot_moveresult_t *mr)
 
 			trap_EA_Command(c, LibVarGetString("cmd_grappleon"));
 			IG_NoteHookFire(c);
+			igp_state[c].firetime = FloatTime();
 			if (igp_state[c].anchorclass == IGA_CLIMB) igpc_fired[c] = 1;	/* IG-40 climbs */
 			IG_GrappleTravelNote(c);
 			igp_state[c].hookout = 1;
