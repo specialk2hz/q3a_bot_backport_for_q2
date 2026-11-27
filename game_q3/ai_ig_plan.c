@@ -308,12 +308,12 @@ static void IGX_FindClimb(igx_t *x, const vec3_t org)
 		if (!AAS_AreaRouteToGoalArea(ar, o, x->goalarea, x->tfl, &tt, &rn) || !rn) return;
 		AAS_ReachabilityFromNum(rn, &r);
 		if ((r.traveltype & TRAVELTYPE_MASK) == TRAVEL_GRAPPLEHOOK) {
-			if (igpc_rn[c] != rn) { igpc_rn[c] = rn; igpc_since[c] = FloatTime(); igpc_fired[c] = 0; }
+			if (igpc_rn[c] != rn && FloatTime() - igpc_since[c] > LibVarValue("ig_planclimbgive", "3")) { igpc_rn[c] = rn; igpc_since[c] = FloatTime(); igpc_fired[c] = 0; }
+			else if (igpc_rn[c] != rn) return;	/* another climb inside the stretch: the stock's (a route flipping between two climbs restarted the clock: Billy saw a bot sit) */
 			if (!igpc_fired[c] && FloatTime() - igpc_since[c] > LibVarValue("ig_planclimbgive", "3")) return;	/* the stock's */
 			x->climbrn = rn;
 			x->nclimb = IG_ClimbAnchorList(rn, &r, x->climbanch);
-			IG_PlanClimbNote(c, rn);
-			return;
+			return;	/* owned (IG_PlanClimbNote) only on a think the planner moves the bot */
 		}
 		if ((r.traveltype & TRAVELTYPE_MASK) != TRAVEL_WALK) return;
 		dist += Distance(o, r.end);
@@ -1242,6 +1242,7 @@ int IG_Plan(bot_state_t *bs, bot_goal_t *goal, bot_moveresult_t *mr)
 		EA_IGMove(c, in.wish, 400, in.jump, 0);
 		igp_state[c].steered = FloatTime();
 		igp_state[c].setmove = 1;
+		if (x.climbrn) IG_PlanClimbNote(c, x.climbrn);	/* IG-48: the stock grapple stands down next think only because the planner moved now */
 		VectorCopy(in.wish, igp_state[c].wish);
 		igp_state[c].jump = in.jump;
 		if (o->anchor >= 0) {
