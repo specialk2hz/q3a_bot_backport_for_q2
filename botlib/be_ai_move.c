@@ -693,6 +693,7 @@ int BotAvoidSpots(vec3_t origin, aas_reachability_t *reach, bot_avoidspot_t *avo
 		case TRAVEL_LADDER: checkbetween = true; break;
 		case TRAVEL_WALKOFFLEDGE: checkbetween = false; break;
 		case TRAVEL_JUMP: checkbetween = false; break;
+		case TRAVEL_STRAFEJUMP: checkbetween = false; break;	// IG: IG-47
 		case TRAVEL_SWIM: checkbetween = true; break;
 		case TRAVEL_WATERJUMP: checkbetween = true; break;
 		case TRAVEL_TELEPORT: checkbetween = false; break;
@@ -3399,6 +3400,7 @@ int BotReachabilityTime(aas_reachability_t *reach)
 		case TRAVEL_LADDER: return 6;
 		case TRAVEL_WALKOFFLEDGE: return 5;
 		case TRAVEL_JUMP: return 5;
+		case TRAVEL_STRAFEJUMP: return 5;	// IG: IG-47
 		case TRAVEL_SWIM: return 5;
 		case TRAVEL_WATERJUMP: return 5;
 		case TRAVEL_TELEPORT: return 5;

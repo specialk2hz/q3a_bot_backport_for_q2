@@ -1242,6 +1242,7 @@ void AAS_InitReachabilityAreas(void)
 
 			//trace arch
 			case TRAVEL_JUMP: break;
+			case TRAVEL_STRAFEJUMP: break;	// IG: IG-47
 			case TRAVEL_ROCKETJUMP: break;
 			case TRAVEL_BFGJUMP: break;
 			case TRAVEL_JUMPPAD: break;
