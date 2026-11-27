@@ -359,9 +359,7 @@ int IG_ClimbRun(void)
 	return (int) LibVarValue("ig_climbrun", "0");
 }
 
-/* IG-32 (2026-11-27, Billy: bots "completely stop moving and grapple and pull
- * to move when a seasoned player would be moving in the direction that they
- * want to grapple"): the run-in window -- within IG_RUN_FIRE of the route's
+/* IG-32 (2026-11-27, Billy: bots bots stop dead, then hook and get pulled, where a seasoned player keeps moving toward the anchor): the run-in window -- within IG_RUN_FIRE of the route's
  * start, or up to IG_RUN_PAST beyond it along the way to the anchor and
  * within IG_RUN_SIDE of that line. A bot running in fires anywhere in it, and
  * keeps the climb route while it is in it (it used to drop the route the
@@ -1071,7 +1069,7 @@ static void IG_ClimbAimCompute(int reachnum, const aas_reachability_t *reach)
 	 * the server allows sky hooks (ig_hooksky) -- so the pull lifts the bot
 	 * straight up onto the middle of the landing. Billy: bots climbing to
 	 * q2rdm11's railgun overlook hooked the side wall and slid into the lava;
-	 * they should hook "near/above where the railgun is placed". */
+	 * they should hook near or above the railgun's spot. */
 	if (!ca->hasframe)
 	{
 		static const float ov[][2] = { {0, 0}, {24, 0}, {-24, 0}, {0, 24}, {0, -24}, {48, 0}, {-48, 0}, {0, 48}, {0, -48} };
@@ -1422,8 +1420,7 @@ int IG_ClimbSteer(int client, const vec3_t origin, int grounded, int hooked, vec
 /* IG-36 landing (libvar ig_climbland, bits; default 0 = IG_ClimbSteer's plain
  * push to the spot). After a climb lets go the bot still flies: at the
  * lava-room door it let go rising at 750 u/s, went 200 units over the floor
- * and drifted past the middle. Billy: "air strafe to stay in the middle of
- * the platform, or grapple down once over the landing zone".
+ * and drifted past the middle. Billy: air strafe to stay over the middle of the platform, or hook down once over the landing.
  *   1 air strafe: wish the velocity that takes it to the spot (brake the
  *     sideways speed it arrived with, then drift in), looking where it goes;
  *   2 grapple down: over the landing floor and still IG_CL_HIGH above it,

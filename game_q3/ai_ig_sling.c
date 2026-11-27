@@ -444,7 +444,7 @@ static void IG_HookMove(bot_state_t *bs, int infight)
 	if (f->time > FloatTime() + 1 || f->cooldown > FloatTime() + IG_FIGHT_COOLDOWN + 5 ||
 		f->shot > FloatTime() + 1 || f->lastkill > FloatTime() + 1) memset(f, 0, sizeof(*f));
 	/* shots, hits and kills: a kill sometimes, two misses always, call for a
-	 * reposition (Billy: "grapple away to reposition, quickly, and try again") */
+	 * reposition (Billy: hook away quickly to reposition and try again) */
 	BotEntityInfo(bs->client, &self);
 	if (EntityIsShooting(&self) && !f->shooting) f->shot = FloatTime();
 	f->shooting = EntityIsShooting(&self);
@@ -707,9 +707,7 @@ int IG_LavaEscape(bot_state_t *bs)
 /* IG-38: strafe planning (libvar ig_strafeplan, default 0). The chain used to
  * check only a straight corridor along its own line; at speed it hopped into
  * what came after: a turn it could not carve, a doorway narrower than its
- * line, a lava edge (Billy: q2rdm11's big lava room -- "they should be able to
- * determine if they should continue strafe jumping or not with proper
- * planning"). IG_StrafePlan reads the route ahead (points at IG_PLAN_N
+ * line, a lava edge (Billy: q2rdm11's big lava room -- bots should plan whether to keep strafe jumping). IG_StrafePlan reads the route ahead (points at IG_PLAN_N
  * lookaheads) and finds the distance along it to the first of:
  *   a TURN: the route's heading more than IG_PLAN_TURN degrees off the
  *     bot's own line;
@@ -732,8 +730,7 @@ int IG_LavaEscape(bot_state_t *bs)
  * no hook busy, strafe jumping. */
 /* IG-13: the pad hook. Flying a jump pad's arc, the bot hooks the floor just
  * past the landing spot and lets go nearly over it: OSP's pull (975 u/s, a
- * straight line) beats the slow top of the arc (Billy: "when a jump pad is
- * taken, the bot uses the grappling hook to get to the landing spot faster"). */
+ * straight line) beats the slow top of the arc (Billy: on a jump pad the bot hooks to reach the landing faster). */
 #define IG_PAD_MIN      120     /* closer than this, the arc is as quick */
 #define IG_PAD_LATE     450     /* hook only within this of the landing (horizontally) */
 #define IG_PAD_TOPVEL   100     /* ... and near the top of the arc or coming down */
@@ -833,8 +830,7 @@ static int IG_PadHook(bot_state_t *bs)
 		if (!IG_PadOn()) return 0;
 		if (FloatTime() - ig_pad[c].start < IG_PAD_SETTLE) return 0;
 		/* the end of the arc, just before the landing: near the top or on
-		 * the way down, and close to it (Billy: "just before the landing,
-		 * a slight advantage in speed, towards the end of the arc") */
+		 * the way down, and close to it (Billy: the hook just before the landing, near the end of the arc, for a small speed gain) */
 		if (bs->cur_ps.velocity[2] > IG_PAD_TOPVEL) return 0;
 		VectorSubtract(land, bs->origin, d);
 		d[2] = 0;

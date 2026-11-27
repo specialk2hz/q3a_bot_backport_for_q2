@@ -46,8 +46,7 @@ static int igfj_on[MAX_CLIENTS];
 static float igfj_onspd = 500, igfj_offspd = 380;
 static int igfj_enabled;
 
-/* Variety (Billy, 2026-11-28: "try to make it 50/50 lip grapple and strafe
- * jumping stairs"): every ig_fastjumproll (8) s a bot rolls whether it takes
+/* Variety (Billy, 2026-11-28: about half lip slingshots, half strafe jumps down the stairs): every ig_fastjumproll (8) s a bot rolls whether it takes
  * momentum jumps for a while, at ig_fastjumpchance (0.5) */
 static float igfj_rolled[MAX_CLIENTS];
 static int igfj_take[MAX_CLIENTS];

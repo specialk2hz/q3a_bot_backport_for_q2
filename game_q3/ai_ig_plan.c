@@ -103,9 +103,6 @@ typedef struct {
 	int			hasjump;					/* IG-47: a momentum jump ahead on the route (IGX_LookAhead) */
 	vec3_t		jumpfrom, jumpdir;			/* its take-off and its direction (level, unit) */
 	int			nearonly;					/* IGX_AnchorTry: only anchors short of the jump's edge */
-	int			hasdoor;					/* the jump's line ends in a doorway (the opening into the next room) */
-	vec3_t		doorc;						/* its centre */
-	vec3_t		doorland;					/* a landing on the doorway's own axis, on the near side */
 	vec3_t		jumpto;						/* the jump's landing */
 	int			hasroutet;					/* the route past the landing: its farthest point in a straight line */
 	vec3_t		routet;
@@ -195,21 +192,6 @@ static int IGX_RouteDirS(igx_t *x, const vec3_t org, int area, vec3_t dir, int *
 	vec3_t t, o;
 
 	if (special) *special = 0;
-	/* IG-47: over a momentum jump's gap, heading for a doorway at the end of its
-	 * line -- steer for the doorway's centre, so the landing lines up with it
-	 * (Billy, ztn2dm3: "it needs to land more to the right so its centered with
-	 * the doorway"; the bots came down 170 units off its centre) -- until the
-	 * bot is down past the edge, or at the doorway */
-	if (x->hasjump && x->hasdoor && LibVarValue("ig_fastjumpdoorsteer", "1")) {
-		vec3_t pe, pd;
-		VectorSubtract(org, x->jumpfrom, pe); pe[2] = 0;
-		VectorSubtract(x->doorland, org, pd); pd[2] = 0;
-		if (VectorLength(pd) < 48) { VectorSubtract(x->doorc, org, pd); pd[2] = 0; }	/* on the axis: on through the door */
-		if (DotProduct(pe, x->jumpdir) > 0 && VectorLength(pd) > 48) {
-			VectorCopy(pd, dir);
-			return VectorNormalize(dir) > 1;
-		}
-	}
 	if (!area) return 0;
 	VectorCopy(org, o);
 	/* the look-ahead point (IGX_LookAhead), until it is reached or passed */
@@ -251,8 +233,7 @@ static int IGX_RouteDir(igx_t *x, const vec3_t org, int area, vec3_t dir)
 	return IGX_RouteDirS(x, org, area, dir, NULL);
 }
 
-/* Curving through turns (Billy, watching roaming bots: "hitting the end of the
- * walls before changing directions instead of curving"). The route's way was
+/* Curving through turns (Billy, watching roaming bots: bots ran into walls at corners instead of curving round them). The route's way was
  * the next step's start -- a corner -- until within 40 units of it. Once a
  * think: walk the route on up to ig_planlookdist (500) units through plain
  * walking steps, and take the farthest point reached in a straight line: the
@@ -282,23 +263,14 @@ static int IGX_LineClear(bot_state_t *bs, const vec3_t a, const vec3_t b)
 
 /* IG-47: a momentum jump seen ahead stays in force until the bot is down on
  * the far side (1.5 s at most), so no hook past its edge mid-flight either */
-/* IG-47, Billy (2026-11-28, ztn2dm3): the lip slingshot "should be aimed to
- * center the bot in the doorway" -- "the doorway is at the end of the intended
- * line ... the lip grapple boosts you over the gap and into the next room via
- * a doorway". The doorway: along the jump's line from its landing on to
- * ig_fastjumpdoor (320) units past it, the narrowest opening (walls either side
- * within 192 units each); its centre ends the line the slingshot aims. */
-static void IGX_Doorway(igx_t *x)
+/* IG-47, Billy (2026-11-28): the lip slingshot should get the bot along its route faster -- the line the lip slingshot aims along: the route
+ * on from the jump's landing, its farthest straight point (on ztn2dm3 it lands
+ * the bots centred with the doorway into the next room). */
+static void IGX_RouteOn(igx_t *x)
 {
-	vec3_t perp, p, a, b, mins = {-8, -8, -8}, maxs = {8, 8, 8}, line;
-	bsp_trace_t tl, tr;
-	float past = LibVarValue("ig_fastjumpdoor", "0"), s, best = 1e9f;	/* 0: off -- with the route past the landing the line lines up anyway (2026-11-28) */
-
-	x->hasdoor = 0;
 	x->hasroutet = 0;
 	if (!x->hasjump) return;
-	{	/* Billy: "how can the lip grapple slingshot get the bot faster along the
-		 * route" -- the route on from the landing: the farthest of its next
+	{	/* Billy: the lip slingshot should get the bot along its route faster -- the route on from the landing: the farthest of its next
 		 * points (within 700 units) in a clear line from the landing */
 		vec3_t o, pt, la, lb;
 		int ar = AAS_PointAreaNum(x->jumpto), k, tt, rn;
@@ -317,56 +289,6 @@ static void IGX_Doorway(igx_t *x)
 			VectorCopy(r.end, o);
 			ar = r.areanum;
 		}
-	}
-	if (past <= 0) return;
-	VectorSubtract(x->jumpto, x->jumpfrom, line); line[2] = 0;
-	if (VectorNormalize(line) < 32) return;
-	VectorSet(perp, -line[1], line[0], 0);
-	for (s = 0; s <= past; s += 16) {
-		float l, r;
-		VectorMA(x->jumpto, s, line, p);
-		p[2] = x->jumpto[2] + 8;
-		VectorMA(p, 192, perp, a);
-		BotAI_Trace(&tl, p, mins, maxs, a, x->bs->entitynum, CONTENTS_SOLID);
-		if (tl.startsolid) break;	/* the line ran into a wall: no doorway past it */
-		VectorMA(p, -192, perp, b);
-		BotAI_Trace(&tr, p, mins, maxs, b, x->bs->entitynum, CONTENTS_SOLID);
-		if (tl.fraction >= 1 || tr.fraction >= 1) continue;
-		l = tl.fraction * 192; r = tr.fraction * 192;
-		if (l + r < best) {
-			best = l + r;
-			VectorMA(p, (l - r) * 0.5f, perp, x->doorc);
-			x->hasdoor = 1;
-		}
-	}
-	if (!x->hasdoor) return;
-	{	/* "centered with the doorway" is on its own axis: the narrowest way
-		 * across the opening is its span, the axis is square to it (q2rdm11's
-		 * diagonal line meets ztn2dm3's door in an east-west wall: its axis runs
-		 * north-south); the landing on that axis, on the near side, as far out
-		 * as the jump's landing is from the door (64..256) */
-		int k, bk = -1;
-		float bw = 1e9f, dl;
-		vec3_t sp, ax, toff;
-		for (k = 0; k < 12; k++) {
-			float ang = k * M_PI / 12, l, r;
-			VectorSet(sp, cos(ang), sin(ang), 0);
-			VectorMA(x->doorc, 256, sp, a);
-			BotAI_Trace(&tl, x->doorc, mins, maxs, a, x->bs->entitynum, CONTENTS_SOLID);
-			VectorMA(x->doorc, -256, sp, b);
-			BotAI_Trace(&tr, x->doorc, mins, maxs, b, x->bs->entitynum, CONTENTS_SOLID);
-			l = tl.fraction * 256; r = tr.fraction * 256;
-			if (l + r < bw) { bw = l + r; bk = k; }
-		}
-		VectorSet(sp, cos(bk * M_PI / 12), sin(bk * M_PI / 12), 0);
-		VectorSet(ax, -sp[1], sp[0], 0);
-		VectorSubtract(x->jumpfrom, x->doorc, toff); toff[2] = 0;
-		if (DotProduct(ax, toff) < 0) VectorScale(ax, -1, ax);
-		dl = Distance(x->jumpto, x->doorc);
-		if (dl < 64) dl = 64;
-		if (dl > 256) dl = 256;
-		VectorMA(x->doorc, dl, ax, x->doorland);
-		x->doorland[2] = x->jumpto[2];
 	}
 }
 
@@ -391,9 +313,7 @@ static void IGX_JumpKeep(igx_t *x)
 	}
 }
 
-/* IG-40 climbs (libvar ig_planclimb; BOT-TRICKS T9). Billy: bots "completely
- * stop moving and grapple and pull to move when a seasoned player would be
- * moving in the direction that they want to grapple", and with a slow hook he
+/* IG-40 climbs (libvar ig_planclimb; BOT-TRICKS T9). Billy: bots bots stop dead, then hook and get pulled, where a seasoned player keeps moving toward the anchor, and with a slow hook he
  * prefires. The stock grapple travel walks to the route's start, stops, aims,
  * fires (71% of climbs from a standstill); loosened it lost climbs (IG-32).
  * Here a grapple route within ig_planclimbdist (600) along the route is the
@@ -532,8 +452,7 @@ static void IGX_LookAhead(igx_t *x, const vec3_t org, int area)
 /* In the air: the wish that keeps the most speed while turning toward the
  * route (Q2's air accel 1 adds speed only within acos(285/speed) of the
  * velocity -- the strafe-jump angle). */
-/* The bot's strafe-jump skill (Billy: "some great bots and some not so great
- * in the game at once"): the share of the most speed a strafe can add. From
+/* The bot's strafe-jump skill (Billy: a mix of strong and weak bots in one game): the share of the most speed a strafe can add. From
  * the character file's characteristic 50 when it is set, else from its
  * jumper and attack skill (0.45 .. 0.90). libvar ig_planstrafeskill 0..1
  * sets it for every bot (testing). */
@@ -866,8 +785,7 @@ static void IGX_Simulate(igx_t *x, igopt_t *o)
 
 /* -------------------------------------------------------------- anchors */
 
-/* Anchors come in three classes, priced apart (Billy: "more slingshots and
- * fewer random wall grapples for no reason"):
+/* Anchors come in three classes, priced apart (Billy: more slingshots, fewer random wall hooks):
  *   IGA_SLING  along the route, 6-18 degrees down, 250+ units: the floor or a
  *              far low wall ahead -- his slingshot (median 275 units, 14 down);
  *              price x ig_planslingmul (0.3)
@@ -895,8 +813,7 @@ static void IGX_AnchorTry(igx_t *x, float pitch, float yaw, float mind, int cls)
 	VectorSubtract(tr.endpos, bs->eye, d);
 	if (VectorLength(d) < mind) return;
 	/* a slingshot hooks the floor ahead, or a far wall: a wall at a
-	 * corridor's end or turn 400 units out was most of q2rdm4's "random
-	 * wall grapples" (575 of 898 slingshots there) */
+	 * corridor's end or turn 400 units out was most of q2rdm4's random wall hooks (575 of 898 slingshots there) */
 	if (cls == IGA_SLING && tr.plane.normal[2] <= 0.7f && !(x->nearonly && tr.plane.normal[2] < -0.7f) && VectorLength(d) < 600) return;	/* IG-47: a lip ceiling is fine */
 	/* IG-47: a momentum jump ahead -- no hook past its take-off: the speed comes
 	 * from a slingshot on this side, let go before the edge, then the jump (Billy:
@@ -972,12 +889,9 @@ static void IGX_Anchors(igx_t *x, const vec3_t routedir)
 	 * the ceiling above the lip: 10-16 degrees up, 180-270 units, let go at
 	 * 935-970 (4 tries). Steep floor and low ceiling anchors short of the edge,
 	 * only with a momentum jump ahead (ig_fastjumplip) */
-	if (x->hasjump && (x->hasdoor || x->hasroutet) && LibVarValue("ig_fastjumplip", "1")) {
-		/* lines that carry the bot on along the route: to the doorway at the
-		 * end of the jump's line, and to the route's farthest straight point
-		 * past the landing; the sim picks the faster */
-		if (x->hasdoor) IGX_LipOnLine(x, x->doorland);
-		if (x->hasroutet) IGX_LipOnLine(x, x->routet);
+	if (x->hasjump && x->hasroutet && LibVarValue("ig_fastjumplip", "1")) {
+		/* the line that carries the bot on along the route past the landing */
+		IGX_LipOnLine(x, x->routet);
 	} else if (x->hasjump && LibVarValue("ig_fastjumplip", "1")) {
 		static const float lippitch[3] = {20, 26, 32}, lipceil[3] = {-10, -14, -18};
 		x->nearonly = 1;
@@ -990,8 +904,7 @@ static void IGX_Anchors(igx_t *x, const vec3_t routedir)
 	}
 }
 
-/* Billy's pad trick (recorded 2026-11-25, q2rdm11: "a jump pad into a grapple
- * and strafe jumping to get across the map fast"): the vertical pad throws him
+/* Billy's pad trick (recorded 2026-11-25, q2rdm11: a jump pad, then a hook, then strafe jumps to cross the map fast): the vertical pad throws him
  * straight up (718 up, 91 across); rising, he turns 150 degrees to face along
  * the upper walkway; just past the top (falling at 214) he hooks LEVEL and far
  * along it (4 degrees up, a wall ~480 units out), the pull takes him to 938
@@ -1118,8 +1031,7 @@ int IG_Plan(bot_state_t *bs, bot_goal_t *goal, bot_moveresult_t *mr)
 	 * hop the landing -- so the anchors whose line has room to hop score best */
 	x.slinghop = LibVarValue("ig_planslinghop", "1") != 0;
 	x.hookcost = LibVarValue("ig_planhookcost", "0.5") * (1.6f - IG_PlanAffinity(bs)) / (1.6f - 0.55f);
-	/* Billy, watching his q2rdm11 pad route drilled: "I was hoping to have just
-	 * the one grapple and strafe jumping used to keep momentum". Carrying speed,
+	/* Billy, watching his q2rdm11 pad route drilled: one hook to start the speed, then strafe jumps to keep it. Carrying speed,
 	 * a hook must gain a lot to beat hopping on: above 450 u/s across its price
 	 * grows, x2.7 at 700, x4 at 900 (ig_planfasthook 0: off). Not in a pad's
 	 * flight, which starts slow. */
@@ -1191,7 +1103,7 @@ int IG_Plan(bot_state_t *bs, bot_goal_t *goal, bot_moveresult_t *mr)
 			if (VectorNormalize(routedir) < 64) VectorCopy(igp_padtoland, routedir);
 			else igp_padroute = 1;
 		}
-	} else if ((IGX_LookAhead(&x, pm.org, pm.area), IGX_JumpKeep(&x), IGX_Doorway(&x), !IGX_RouteDir(&x, pm.org, pm.area, routedir))) {
+	} else if ((IGX_LookAhead(&x, pm.org, pm.area), IGX_JumpKeep(&x), IGX_RouteOn(&x), !IGX_RouteDir(&x, pm.org, pm.area, routedir))) {
 		if (!ours) return 0;
 		VectorSet(routedir, bs->cur_ps.velocity[0], bs->cur_ps.velocity[1], 0);
 		if (VectorNormalize(routedir) < 1) return 0;
@@ -1215,8 +1127,7 @@ int IG_Plan(bot_state_t *bs, bot_goal_t *goal, bot_moveresult_t *mr)
 		/* T3, the pull hop: hop off the floor while the hook drags (friction eats the pull) */
 		if (ground) for (k = 2; k <= 3; k++) OPT(PO_HOLDHOP, 1, 0, -1, -1, k, 0);
 	} else {
-		/* Billy: "the bots sometimes just jump in place ... the jumping should be
-		 * in use for movement purposes". A hop from a standstill gains nothing (the
+		/* Billy: bots hopped in place with nowhere to go; jumps should serve movement. A hop from a standstill gains nothing (the
 		 * ground accelerates faster than the air), yet scored near the run and was
 		 * picked now and then -- after a respawn, say. On the ground, hops only
 		 * when already moving (ig_planhopmin u/s across, default 250). */
@@ -1510,9 +1421,7 @@ static void IGX_InputCheck(bot_state_t *bs, const bot_input_t *bi)
 				bi->viewangles[PITCH], bi->viewangles[YAW], igp_state[c].view[PITCH], igp_state[c].view[YAW]);
 }
 
-/* No jump from (near) a standstill (Billy: "the bots sometimes just jump in
- * place when they dont have any movement ... the jumping should be in use for
- * movement purposes"). On the final input: a jump the planner or the fight
+/* No jump from (near) a standstill (Billy: bots hopped in place with nowhere to go; jumps should serve movement). On the final input: a jump the planner or the fight
  * planner set this think, or the stock fight move's (its jumper trait), with
  * under ig_planhopmin u/s across (default 250; 0 = off) goes. Kept: the
  * slingshot's start (jump, then fire) and the stock route's own jumps (a
@@ -1705,7 +1614,7 @@ static int IGX_Sees(bot_state_t *bs, const vec3_t eye, const vec3_t target)
 }
 
 static float igf_lat, igf_peek;	/* tuning (libvars ig_pflat, ig_pfpeek), read once a think */
-/* Position (Billy: the fight planner was "even, slower-paced, worse positioned"):
+/* Position (Billy: the fight planner was even, but slower and worse positioned):
  * where a dodge leaves the bot on the way to its long-term goal -- the roam's
  * hunt or high-ground point, or the item it was after -- against where it is
  * now (ig_pfroute, per second of travel saved), and the higher ground
@@ -1879,8 +1788,7 @@ static int IGX_FightFlight(bot_state_t *bs)
 	return 1;
 }
 
-/* IG-40: a pad flight in a fight (Billy, 2026-11-27: "bots are hitting the
- * jump pads but steering away from the intended landing spot"). The fight
+/* IG-40: a pad flight in a fight (Billy, 2026-11-27: bots hit the pads but steered away from the landing). The fight
  * node runs no travel, so the pad's air control never ran there and the
  * stock attack dodge steered the flight: q2rdm11's twin pads, 16 fight
  * matches, hook-free flights made the ledge 56% (the drill, no fight: 100%),
@@ -1982,8 +1890,7 @@ int IG_PlanFight(bot_state_t *bs)
 	igf_high = LibVarValue("ig_pfhigh", "0.03");
 	igf_near = LibVarValue("ig_pfnear", "0");
 	igf_nearat = LibVarValue("ig_pfnearat", "300");
-	/* ig_pfstance 1 (Billy: "railgun is about angles and keeping distance
-	 * sometimes"): not always closing in. Each fight -- a new enemy, or every
+	/* ig_pfstance 1 (Billy: with the railgun, angles and keeping distance matter): not always closing in. Each fight -- a new enemy, or every
 	 * 3-6 s -- picks a range to hold: close 250, mid 550 or long 900, the odds
 	 * from the character's aggression (close 0.15 + 0.5 a, long 0.45 - 0.4 a). */
 	igf_range = 0;
@@ -2104,9 +2011,7 @@ int IG_PlanPadSlingOn(void)
  * planner). The stock pad travel steers the air toward the landing and leaves
  * the view to the roam clamp (be_interface_q2.c), which follows that push as it
  * swings: on q2rdm11's twin pads the view sat 61 degrees off the travel, behind
- * the bot 25% of the flight, turning 226 deg/s (Billy: "they look like they're
- * spinning ... they should be facing the direction they want to land unless
- * they are trying to do a trick or shoot someone"). The bot's input is turned
+ * the bot 25% of the flight, turning 226 deg/s (Billy: bots spun in pad flights; they should face where they land unless doing a trick or shooting). The bot's input is turned
  * by its view, so a spinning view also spoils the air control. Here: level,
  * toward the landing; within 48 units of it, along the travel. An enemy, a
  * hook's flick or the planner's own steering come first. */
@@ -2142,7 +2047,7 @@ int IG_PlanPadView(bot_state_t *bs)
  * planner). The stock pad steering (BotAirControl) pushes at full strength
  * at the landing it predicts without the push itself, so it overcorrects: on
  * q2rdm11's twin pads bots drifted past the landing into the side wall and
- * fell (Billy: "they're not bouncing to the optimal spot"). Here, each think:
+ * fell (Billy: not landing on the best spot). Here, each think:
  * no push, or one of 16 directions held for the rest of the flight, each flown
  * by the simulator; the one that lands nearest the pad's landing (a landing
  * below it priced x3 per unit; lava out) is the input. */
@@ -2186,7 +2091,7 @@ int IG_PlanPadAir(bot_state_t *bs)
  * the push direction (be_interface_q2.c), chased a target that jumped around
  * while the push sat 70-90 degrees off the travel at speed: the view turned at
  * its 360 deg/s limit nonstop and the model spun, strafing sideways or
- * backwards (Billy: "the model converts into strafe jumping backwards"). A
+ * backwards (Billy: the model ended up strafe-jumping backwards). A
  * player holds forward and a side key, so his view is 45 degrees from the push,
  * toward where he is going: that, and level. */
 int IG_PlanFlightView(bot_state_t *bs)
