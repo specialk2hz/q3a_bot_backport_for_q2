@@ -548,7 +548,6 @@ BSPC_OBJS_ = \
 BOTLIB_OBJS_ = \
 	botlib/be_ig_hook.o \
 	botlib/be_ig_roamgoal.o \
-	botlib/be_ig_route.o \
 	botlib/be_ig_jump.o \
 	botlib/be_aas_bspq2.o \
 	botlib/be_aas_cluster.o \

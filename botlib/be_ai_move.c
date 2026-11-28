@@ -3913,25 +3913,6 @@ static int IG_PadDrill(bot_movestate_t *ms, bot_moveresult_t *result)
 						t1 = AAS_AreaTravelTimeToGoalArea(sa, sp, rr->areanum, TFL_DEFAULT | TFL_GRAPPLEHOOK);
 						t2 = AAS_AreaTravelTimeToGoalArea(rr->edgenum ? AAS_PointAreaNum(rr->end) : AAS_PointAreaNum(rr->end), rr->end, igpd_goal.areanum, TFL_DEFAULT | TFL_GRAPPLEHOOK);
 						botimport.Print(PRT_MESSAGE, "igpaddrill predict direct %d to-reach %d reach %d after %d\n", td, t1, rr->traveltime, t2);
-						{	void IG_RouteDebugPath(const char *tag, vec3_t org, int goal);
-							vec3_t w = {300, 1110, 352}, lnd;
-							VectorCopy(rr->end, lnd);
-							int wa = 0, k2;
-							for (k2 = 0; k2 < 8 && !(wa = AAS_PointAreaNum(w)); k2++) w[2] += 8;
-							botimport.Print(PRT_MESSAGE, "igrdbg walkway from area %d to area %d\n", AAS_PointAreaNum(lnd), wa);
-							IG_RouteDebugPath("walkway", lnd, wa);
-							IG_RouteDebugPath("walkgoal", w, igpd_goal.areanum);
-							{	/* where the walkway breaks: from points along it to the waypoint */
-								int xs[] = {1200, 1000, 800, 700, 650, 600, 560, 520, 450}, q;
-								for (q = 0; q < 9; q++) {
-									vec3_t pt; int pa = 0, k3, tt2 = 0;
-									VectorSet(pt, xs[q], 1100, 344);
-									for (k3 = 0; k3 < 10 && !(pa = AAS_PointAreaNum(pt)); k3++) pt[2] += 8;
-									if (pa) tt2 = AAS_AreaTravelTimeToGoalArea(pa, pt, wa, TFL_DEFAULT | TFL_GRAPPLEHOOK);
-									botimport.Print(PRT_MESSAGE, "igrdbg along x %d z %.0f area %d to waypoint %d\n", xs[q], pt[2], pa, tt2);
-								}
-							}
-						}
 						{	/* the route steps, direct and to the pad */
 							int pass;
 							for (pass = 0; pass < 3; pass++) {
@@ -3949,11 +3930,7 @@ static int IG_PadDrill(bot_movestate_t *ms, bot_moveresult_t *result)
 							}
 						}
 					}
-					else {
-						void IG_RouteDebugPath(const char *tag, vec3_t org, int goal);
-						botimport.Print(PRT_MESSAGE, "igpaddrill predict direct %d\n", td);
-						if (sa) IG_RouteDebugPath("natural", sp, igpd_goal.areanum);
-					}
+					else botimport.Print(PRT_MESSAGE, "igpaddrill predict direct %d\n", td);
 				}
 				return 1;
 			case 1:

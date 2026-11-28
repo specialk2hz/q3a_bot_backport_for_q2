@@ -840,7 +840,7 @@ static void IGX_AnchorTry(igx_t *x, float pitch, float yaw, float mind, int cls)
 	/* IG-47: a momentum jump ahead -- no hook past its take-off: the speed comes
 	 * from a slingshot on this side, let go before the edge, then the jump (Billy:
 	 * a pull straight across to the far wall is predictable) */
-	if (x->hasjump && (x->nearonly || LibVarValue("ig_fastjumpnoacross", "0"))) {
+	if (x->hasjump && x->nearonly) {
 		vec3_t pa; VectorSubtract(tr.endpos, x->jumpfrom, pa); pa[2] = 0;
 		if (DotProduct(pa, x->jumpdir) > 0) return;
 	}
@@ -2151,49 +2151,6 @@ int IG_PlanPadView(bot_state_t *bs)
 	}
 	bs->ideal_viewangles[YAW] = AngleMod(atan2(d[1], d[0]) * 180 / M_PI);
 	bs->ideal_viewangles[PITCH] = 0;
-	return 1;
-}
-
-/* Air control in a pad's flight (libvar ig_planpadair, default 0 since Billy's A/B, with the
- * planner). The stock pad steering (BotAirControl) pushes at full strength
- * at the landing it predicts without the push itself, so it overcorrects: on
- * q2rdm11's twin pads bots drifted past the landing into the side wall and
- * fell (Billy: not landing on the best spot). Here, each think:
- * no push, or one of 16 directions held for the rest of the flight, each flown
- * by the simulator; the one that lands nearest the pad's landing (a landing
- * below it priced x3 per unit; lava out) is the input. */
-int IG_PlanPadAir(bot_state_t *bs)
-{
-	int c = bs->client, k, t, half, best = -2;
-	vec3_t end, wish, bestwish = {0, 0, 0}, d;
-	float bestd = 1e9f, fm, sm, yaw = bs->viewangles[YAW];
-	igpm_t pm;
-
-	if (!IG_PlanOn() || c < 0 || c >= MAX_CLIENTS) return 0;
-	if (bs->cur_ps.groundEntityNum != ENTITYNUM_NONE || igp_state[c].hookout) return 0;
-	if (!IG_PadFlight(c, end)) return 0;
-	if (LibVarValue("ig_viewdebug", "0")) BotAI_Print(PRT_MESSAGE, "igpadend %d end %.0f %.0f %.0f\n", c, end[0], end[1], end[2]);
-	if (!LibVarValue("ig_planpadair", "0")) return 0;
-	for (k = -1; k < 16; k++) {
-		float dist;
-
-		if (k < 0) VectorClear(wish);
-		else VectorSet(wish, cos(k * M_PI / 8), sin(k * M_PI / 8), 0);
-		IG_PmoveInit(&pm, bs->cur_ps.origin, bs->cur_ps.velocity, 0, bs->entitynum, 0);
-		IGX_Moves(wish, yaw, &fm, &sm);
-		for (t = 0; t < 60 && !pm.ground; t++)
-			for (half = 0; half < 2 && !pm.ground; half++)
-				IG_Pmove(&pm, fm, sm, 0, 0, yaw, 25);
-		if (pm.everhit & (CONTENTS_LAVA | CONTENTS_SLIME)) continue;
-		VectorSubtract(end, pm.org, d);
-		dist = sqrt(d[0] * d[0] + d[1] * d[1]);
-		if (end[2] - pm.org[2] > 32) dist += 3 * (end[2] - pm.org[2] - 32);
-		if (dist < bestd - 1) { bestd = dist; best = k; VectorCopy(wish, bestwish); }
-	}
-	if (best < -1) return 0;
-	EA_Move(c, bestwish, best < 0 ? 0 : 400);
-	if (trap_Cvar_VariableIntegerValue("ig_plandebug") == 4)
-		BotAI_Print(PRT_MESSAGE, "igpadair %d dir %d miss %.0f\n", c, best, bestd);
 	return 1;
 }
 

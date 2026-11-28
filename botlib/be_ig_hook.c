@@ -389,7 +389,7 @@ int IG_ClimbRunWindow(const vec3_t origin, const vec3_t start, const vec3_t aimd
 
 int IG_ClimbFireNow(const vec3_t origin, const vec3_t viewoffset, const vec3_t viewangles, const vec3_t start, const vec3_t aimdir, int passent, float speed)
 {
-	vec3_t d, ideal, eye, end;
+	vec3_t ideal, end;
 	aas_trace_t trace;
 	float len, tol;
 
@@ -407,7 +407,6 @@ int IG_ClimbFireNow(const vec3_t origin, const vec3_t viewoffset, const vec3_t v
 		fabs(AngleMod(ideal[1] - viewangles[1] + 180) - 180) >= tol) return 0;
 	/* from here, not bspc's start, the pull carries the body along a lower
 	 * line: only if the body clears it (to IG_RUN_CLEAR of the way) */
-	VectorAdd(origin, viewoffset, eye);
 	VectorMA(origin, IG_RUN_CLEAR, aimdir, end);
 	trace = AAS_TraceClientBBox((vec_t *) origin, end, PRESENCE_NORMAL, passent);
 	return trace.fraction >= 1;
@@ -670,25 +669,6 @@ static float  ig_padseen[MAX_CLIENTS];
 /* The landing of the jump pad a bot is rising off (IG-40 pad flights in a
  * fight, ai_ig_plan.c): the nearest TRAVEL_JUMPPAD route out of the jump-pad
  * area at or up to 160 units below it. 1 and end, or 0 */
-/* debug (ig_paddump x y): every jump-pad route out of the pad area under a point */
-void IG_PadDump(void)
-{
-	char *xs = LibVarString("ig_paddumpx", ""), *ys = LibVarString("ig_paddumpy", "");
-	vec3_t p;
-	int dz, a, i;
-	if (!xs[0] || !ys[0]) return;
-	for (dz = 200; dz >= -40; dz -= 16) {
-		VectorSet(p, atof(xs), atof(ys), dz);
-		a = AAS_PointAreaNum(p);
-		if (!a || !(aasworld.areasettings[a].contents & AREACONTENTS_JUMPPAD)) continue;
-		for (i = 0; i < aasworld.areasettings[a].numreachableareas; i++) {
-			aas_reachability_t *r = &aasworld.reachability[aasworld.areasettings[a].firstreachablearea + i];
-			botimport.Print(PRT_MESSAGE, "igpaddump area %d z %d reach %d type %d to area %d start %.0f %.0f %.0f end %.0f %.0f %.0f time %d\n", a, dz,
-				aasworld.areasettings[a].firstreachablearea + i, r->traveltype & TRAVELTYPE_MASK, r->areanum, r->start[0], r->start[1], r->start[2], r->end[0], r->end[1], r->end[2], r->traveltime);
-		}
-		return;
-	}
-}
 
 int IG_PadLaunchEnd(const vec3_t origin, vec3_t end)
 {
@@ -1328,7 +1308,7 @@ static int IG_FloorUnder(const vec3_t origin, float oz)
 #define IG_GRAVITY   800
 static int IG_ArcLands(const vec3_t origin, const vec3_t velocity, float oz)
 {
-	vec3_t p, q, end;
+	vec3_t p, q;
 	aas_trace_t tr;
 	float t, vz;
 
@@ -1379,9 +1359,7 @@ int IG_ClimbAimHoldStall(int client)
  * pull has stalled (speed under IG_STALL_LETGO) */
 int IG_ClimbAimLetGo(int client, const vec3_t origin, const vec3_t velocity)
 {
-	vec3_t d, p;
-
-	aas_trace_t trace;
+	vec3_t d;
 
 	if (client < 0 || client >= MAX_CLIENTS || !ig_capick[client]) return 0;
 	if (origin[2] < ig_caoz[client] + 8) return 0;
@@ -1443,7 +1421,6 @@ int IG_ClimbLand(int client, const vec3_t origin, const vec3_t velocity, const v
 {
 	int mode = (int) LibVarValue("ig_climbland", "0");
 	vec3_t d, eye, end, ang, want;
-	aas_trace_t down;
 	bsp_trace_t tr;
 	float oz;
 

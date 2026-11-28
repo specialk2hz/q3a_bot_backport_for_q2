@@ -123,13 +123,6 @@ static int IGJ_Fly(vec3_t e, vec3_t d, float speed, int want, vec3_t land, float
 	return 0;
 }
 
-static void IGJ_Rej(int debug, const char *why, vec3_t e, int k)
-{
-	float wx = atof(LibVarString("ig_gapjumpwatchx", "0")), wy = atof(LibVarString("ig_gapjumpwatchy", "0"));
-	if (debug >= 2 && fabs(e[0] - wx) < 96 && fabs(e[1] - wy) < 96)
-		botimport.Print(PRT_MESSAGE, "ig: gapjump reject %s at %.0f %.0f %.0f dir %d\n", why, e[0], e[1], e[2], k);
-}
-
 void IG_GapJumpsAtLoad(void)
 {
 	static igjump_t found[IG_GJ_MAX];
@@ -144,28 +137,13 @@ void IG_GapJumpsAtLoad(void)
 
 	igfj_enabled = 0;
 	if (!LibVarValue("ig_gapjumps", "0") && !fast) return;
-	if (debug >= 3) {	/* the areas at points west of the watch point */
-		int q;
-		for (q = 0; q < 6; q++) {
-			vec3_t pt; int pa;
-			VectorSet(pt, atof(LibVarString("ig_gapjumpwatchx", "0")) + 40 - q * 40, atof(LibVarString("ig_gapjumpwatchy", "0")), atof(LibVarString("ig_gapjumpwatchz", "376")));
-			pa = AAS_PointAreaNum(pt);
-			if (pa) botimport.Print(PRT_MESSAGE, "ig: gapjump point %.0f %.0f %.0f area %d mins %.0f %.0f %.0f maxs %.0f %.0f %.0f centre %.0f %.0f grounded %d\n", pt[0], pt[1], pt[2], pa,
-				aasworld.areas[pa].mins[0], aasworld.areas[pa].mins[1], aasworld.areas[pa].mins[2], aasworld.areas[pa].maxs[0], aasworld.areas[pa].maxs[1], aasworld.areas[pa].maxs[2],
-				aasworld.areas[pa].center[0], aasworld.areas[pa].center[1], AAS_AreaGrounded(pa));
-			else botimport.Print(PRT_MESSAGE, "ig: gapjump point %.0f %.0f %.0f no area\n", pt[0], pt[1], pt[2]);
-		}
-	}
+
 	if (!LibVarValue("ig_gapjumps", "0")) maxgap = 0;	/* momentum jumps only */
 	for (a = 1; a < aasworld.numareas && nfound < IG_GJ_MAX; a++) {
 		aas_area_t *ar = &aasworld.areas[a];
-		vec3_t mid0;
 		vec3_t o;
 
 		VectorSet(o, ar->center[0], ar->center[1], ar->mins[2] + 1);
-		if (debug >= 3 && ar->mins[0] < atof(LibVarString("ig_gapjumpwatchx", "0")) + 200 && ar->maxs[0] > atof(LibVarString("ig_gapjumpwatchx", "0")) - 200 && ar->mins[1] < atof(LibVarString("ig_gapjumpwatchy", "0")) && ar->maxs[1] > atof(LibVarString("ig_gapjumpwatchy", "0")) && ar->maxs[2] > 300 && ar->mins[2] < 400)
-			botimport.Print(PRT_MESSAGE, "ig: gapjump near area %d centre %.0f %.0f %.0f mins %.0f %.0f maxs %.0f %.0f grounded %d crouch %d contents %d inarea %d ground %d\n", a, o[0], o[1], o[2],
-				ar->mins[0], ar->mins[1], ar->maxs[0], ar->maxs[1], AAS_AreaGrounded(a), AAS_AreaCrouch(a), aasworld.areasettings[a].contents, AAS_PointAreaNum(o), IGJ_Ground(o, 32, mid0));
 		if (!AAS_AreaGrounded(a) || AAS_AreaSwim(a) || AAS_AreaCrouch(a)) continue;
 		if (aasworld.areasettings[a].contents & (AREACONTENTS_LAVA | AREACONTENTS_SLIME | AREACONTENTS_JUMPPAD | AREACONTENTS_TELEPORTER)) continue;
 		/* take-off points: the centre, and with ig_fastjumps up to 5 along each
@@ -201,7 +179,7 @@ void IG_GapJumpsAtLoad(void)
 			if (!ok) continue;
 			VectorCopy(q, e);
 			ta = AAS_PointAreaNum(e);
-			if (!ta || !AAS_AreaGrounded(ta)) { IGJ_Rej(debug, "edge area", e, k); continue; }
+			if (!ta || !AAS_AreaGrounded(ta)) continue;
 			/* the far side: floor at the same height (momentum jumps: further, and
 			 * down to ig_fastjumpdrop below) */
 			la = 0;
@@ -215,21 +193,20 @@ void IG_GapJumpsAtLoad(void)
 					break;
 				}
 			}
-			if (!la || la == ta || !AAS_AreaGrounded(la)) { IGJ_Rej(debug, la ? "far area" : "no far floor", e, k); continue; }
+			if (!la || la == ta || !AAS_AreaGrounded(la)) continue;
 			if (aasworld.areasettings[la].contents & (AREACONTENTS_LAVA | AREACONTENTS_SLIME | AREACONTENTS_JUMPPAD | AREACONTENTS_TELEPORTER)) continue;
 			if (IGJ_HasRoute(ta, la)) {
-				IGJ_Rej(debug, "has route", e, k);
 				continue;
 			}
 			{
 				int c1 = aasworld.areasettings[ta].cluster, c2 = aasworld.areasettings[la].cluster;
-				if (!(c1 == c2 || c1 < 0 || c2 < 0)) { IGJ_Rej(debug, "clusters", e, k); continue; }
+				if (!(c1 == c2 || c1 < 0 || c2 < 0)) continue;
 			}
 			/* what is under the gap: a floor, not lava, slime or nothing */
 			VectorMA(e, gap * 0.5f, d, mid);
 			VectorCopy(mid, below); below[2] -= 4000;
 			tr = AAS_TraceClientBBox(mid, below, PRESENCE_NORMAL, -1);
-			if (tr.fraction >= 1) { IGJ_Rej(debug, "void", e, k); continue; }
+			if (tr.fraction >= 1) continue;
 			if (AAS_PointContents(tr.endpos) & (CONTENTS_LAVA | CONTENTS_SLIME)) continue;
 			{
 				vec3_t b2; VectorCopy(tr.endpos, b2); b2[2] -= 8;
@@ -242,7 +219,7 @@ void IG_GapJumpsAtLoad(void)
 				int lowjump;
 				for (sp = speed; sp <= top; sp += 25)
 					if (IGJ_Fly(e, d, sp, la, land, &t)) break;
-				if (sp > top) { IGJ_Rej(debug, "flight", e, k); continue; }
+				if (sp > top) continue;
 				lowjump = gap <= maxgap && land[2] >= e[2] - 48 && sp <= speed;
 				if (!lowjump && !fast) continue;
 				needsp = sp;
