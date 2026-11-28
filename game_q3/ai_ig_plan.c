@@ -79,6 +79,7 @@ typedef struct {
 	int		ok;
 	vec3_t	at[3];	/* ig_planoutcheck: where its simulation has the bot 0.5, 1.0, 1.5 s on */
 	vec3_t	atvel[3];
+	int		athook[3];	/* and its hook then (0 none, 1 flying, 2+ pulling) */
 	int		nat;
 } igopt_t;
 
@@ -141,8 +142,10 @@ static struct {
 	float	firetime;		/* our hook's fire, for the commit to it (ig_planhookcommit) */
 	float	jumpuntil;
 	vec3_t	jumpfrom, jumpdir, jumpto;
+	bot_goal_t	goal;		/* the goal of its last plan: a climb in a fight goes on toward it */
+	float	goaltime;
 	/* ig_planoutcheck: a fired hook's predicted path, checked as it happens */
-	float	chk0; int chkn, chkdone, chkkind, chklip, chkcls; vec3_t chkat[3], chkvel[3], chkfrom;
+	float	chk0; int chkn, chkdone, chkkind, chklip, chkcls, chkhook[3]; vec3_t chkat[3], chkvel[3], chkfrom;
 } igp_state[MAX_CLIENTS];
 
 /* ------------------------------------------------------------ diagnostics */
@@ -172,12 +175,16 @@ void IG_PlanTick(bot_state_t *bs)
 
 	if (c >= 0 && c < MAX_CLIENTS && igp_state[c].chkn > igp_state[c].chkdone &&
 		FloatTime() - igp_state[c].chk0 >= 0.5f * (igp_state[c].chkdone + 1) - 0.025f) {
-		int k2 = igp_state[c].chkdone++;
+		int k2 = igp_state[c].chkdone++, rh;
+		vec3_t reye, rhp;
 		float *pa = igp_state[c].chkat[k2], *pv = igp_state[c].chkvel[k2], *ra = bs->cur_ps.origin, *rv = bs->cur_ps.velocity;
-		BotAI_Print(PRT_MESSAGE, "igpout %d t %.1f err %.0f pred %.0f %.0f %.0f v %.0f real %.0f %.0f %.0f v %.0f from %.0f %.0f %.0f lip %d cls %d\n", c, 0.5f * (k2 + 1),
+		VectorCopy(bs->cur_ps.origin, reye); reye[2] += bs->cur_ps.viewheight;
+		rh = IG_OwnHook(reye, VectorLength(bs->cur_ps.velocity), rhp);
+		BotAI_Print(PRT_MESSAGE, "igpout %d t %.1f err %.0f pred %.0f %.0f %.0f v %.0f real %.0f %.0f %.0f v %.0f from %.0f %.0f %.0f lip %d cls %d hook %d %d vz %.0f %.0f\n", c, 0.5f * (k2 + 1),
 			sqrt((pa[0] - ra[0]) * (pa[0] - ra[0]) + (pa[1] - ra[1]) * (pa[1] - ra[1]) + (pa[2] - ra[2]) * (pa[2] - ra[2])),
 			pa[0], pa[1], pa[2], sqrt(pv[0] * pv[0] + pv[1] * pv[1]), ra[0], ra[1], ra[2], sqrt(rv[0] * rv[0] + rv[1] * rv[1]),
-			igp_state[c].chkfrom[0], igp_state[c].chkfrom[1], igp_state[c].chkfrom[2], igp_state[c].chklip, igp_state[c].chkcls);
+			igp_state[c].chkfrom[0], igp_state[c].chkfrom[1], igp_state[c].chkfrom[2], igp_state[c].chklip, igp_state[c].chkcls,
+			igp_state[c].chkhook[k2], rh, pv[2], rv[2]);
 	}
 	if (c < 0 || c >= MAX_CLIENTS || trap_Cvar_VariableIntegerValue("ig_plandebug") != 2) return;
 	VectorCopy(bs->cur_ps.origin, eye);
@@ -734,7 +741,7 @@ static void IGX_Simulate(igx_t *x, igopt_t *o)
 		if (pm.blocked && before - after > 200) { wallpen += 0.15f * (before - after) / 300 * LibVarValue("ig_planwallmul", "1") * (x->released ? LibVarValue("ig_planreleasewallmul", "1.5") : 1); if (t < LibVarValue("ig_planwallsoon", "2")) o->wallhit = 1; }
 		flow += after;
 		flown++;
-		if (++step % 5 == 0 && o->nat < 3) { VectorCopy(pm.org, o->at[o->nat]); VectorCopy(pm.vel, o->atvel[o->nat]); o->nat++; }
+		if (++step % 5 == 0 && o->nat < 3) { VectorCopy(pm.org, o->at[o->nat]); VectorCopy(pm.vel, o->atvel[o->nat]); o->athook[o->nat] = pm.hook; o->nat++; }
 		if (pm.pad || pm.teleport) break;	/* the navigation file knows where those go */
 	}
 	if (pm.hook == 1 && pm.hooklost) wallpen += 0.05f;	/* a wasted hook */
@@ -768,7 +775,7 @@ static void IGX_Simulate(igx_t *x, igopt_t *o)
 			for (half = 0; half < 2; half++)
 				IG_Pmove(&pm, fm, sm, 0, in.view[PITCH], in.view[YAW], 50);
 			if (pm.everhit & (CONTENTS_LAVA | CONTENTS_SLIME)) return;
-			if (++step % 5 == 0 && o->nat < 3) { VectorCopy(pm.org, o->at[o->nat]); VectorCopy(pm.vel, o->atvel[o->nat]); o->nat++; }
+			if (++step % 5 == 0 && o->nat < 3) { VectorCopy(pm.org, o->at[o->nat]); VectorCopy(pm.vel, o->atvel[o->nat]); o->athook[o->nat] = 0; o->nat++; }
 			VectorSet(vh, pm.vel[0], pm.vel[1], 0);
 			after = VectorLength(vh);
 			if (pm.blocked && before - after > 200) { wallpen += 0.15f * (before - after) / 300 * LibVarValue("ig_planwallmul", "1") * (x->released ? LibVarValue("ig_planreleasewallmul", "1.5") : 1); }
@@ -1038,6 +1045,7 @@ int IG_Plan(bot_state_t *bs, bot_goal_t *goal, bot_moveresult_t *mr)
 		return igp_state[c].ret;
 	}
 	igp_state[c].decided = FloatTime();
+	if (goal != &igp_state[c].goal) { igp_state[c].goal = *goal; igp_state[c].goaltime = FloatTime(); }
 	igp_state[c].ret = 0;
 	igp_state[c].setmove = 0;
 	Com_Memset(&x, 0, sizeof(x));
@@ -1408,7 +1416,7 @@ int IG_Plan(bot_state_t *bs, bot_goal_t *goal, bot_moveresult_t *mr)
 				igp_state[c].chkkind = o->kind; igp_state[c].chklip = o->anchor >= 0 ? x.anchorlip[o->anchor] : 0;
 				igp_state[c].chkcls = igp_state[c].anchorclass;
 				VectorCopy(bs->cur_ps.origin, igp_state[c].chkfrom);
-				for (k2 = 0; k2 < o->nat; k2++) { VectorCopy(o->at[k2], igp_state[c].chkat[k2]); VectorCopy(o->atvel[k2], igp_state[c].chkvel[k2]); }
+				for (k2 = 0; k2 < o->nat; k2++) { VectorCopy(o->at[k2], igp_state[c].chkat[k2]); VectorCopy(o->atvel[k2], igp_state[c].chkvel[k2]); igp_state[c].chkhook[k2] = o->athook[k2]; }
 			}
 			igp_state[c].firetime = FloatTime();
 			if (igp_state[c].anchorclass == IGA_CLIMB) igpc_fired[c] = 1;	/* IG-40 climbs */
@@ -1704,6 +1712,15 @@ static int IGX_FightFlight(bot_state_t *bs)
 	VectorCopy(bs->cur_ps.origin, eye);
 	eye[2] += bs->cur_ps.viewheight;
 	hs = IG_OwnHook(eye, VectorLength(bs->cur_ps.velocity), hp);
+	if (hs && igp_state[c].hookout && igp_state[c].anchorclass == IGA_CLIMB && LibVarValue("ig_planfightclimb", "1") &&
+		FloatTime() - igp_state[c].goaltime < 5 && igp_state[c].goal.areanum) {
+		/* a climb: finish it -- the planner keeps the move toward the goal it
+		 * was climbing to and lets go when its simulation says so. Dropped at the
+		 * fight's start, 71-73% of the climbs let go early fell back (both hooks) */
+		bot_moveresult_t mr;
+		Com_Memset(&mr, 0, sizeof(mr));
+		return IG_Plan(bs, &igp_state[c].goal, &mr);
+	}
 	if (hs && igp_state[c].hookout) {
 		/* our slingshot's hook: let go when that is safe, else hold on (the
 		 * fight hook's own rule, IG_ARC_HOLD in ai_ig_sling.c) */
