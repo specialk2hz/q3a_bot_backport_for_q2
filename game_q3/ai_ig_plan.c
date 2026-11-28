@@ -142,7 +142,7 @@ static struct {
 	float	jumpuntil;
 	vec3_t	jumpfrom, jumpdir, jumpto;
 	/* ig_planoutcheck: a fired hook's predicted path, checked as it happens */
-	float	chk0; int chkn, chkdone, chkkind, chklip; vec3_t chkat[3], chkvel[3], chkfrom;
+	float	chk0; int chkn, chkdone, chkkind, chklip, chkcls; vec3_t chkat[3], chkvel[3], chkfrom;
 } igp_state[MAX_CLIENTS];
 
 /* ------------------------------------------------------------ diagnostics */
@@ -174,10 +174,10 @@ void IG_PlanTick(bot_state_t *bs)
 		FloatTime() - igp_state[c].chk0 >= 0.5f * (igp_state[c].chkdone + 1) - 0.025f) {
 		int k2 = igp_state[c].chkdone++;
 		float *pa = igp_state[c].chkat[k2], *pv = igp_state[c].chkvel[k2], *ra = bs->cur_ps.origin, *rv = bs->cur_ps.velocity;
-		BotAI_Print(PRT_MESSAGE, "igpout %d t %.1f err %.0f pred %.0f %.0f %.0f v %.0f real %.0f %.0f %.0f v %.0f from %.0f %.0f %.0f lip %d\n", c, 0.5f * (k2 + 1),
+		BotAI_Print(PRT_MESSAGE, "igpout %d t %.1f err %.0f pred %.0f %.0f %.0f v %.0f real %.0f %.0f %.0f v %.0f from %.0f %.0f %.0f lip %d cls %d\n", c, 0.5f * (k2 + 1),
 			sqrt((pa[0] - ra[0]) * (pa[0] - ra[0]) + (pa[1] - ra[1]) * (pa[1] - ra[1]) + (pa[2] - ra[2]) * (pa[2] - ra[2])),
 			pa[0], pa[1], pa[2], sqrt(pv[0] * pv[0] + pv[1] * pv[1]), ra[0], ra[1], ra[2], sqrt(rv[0] * rv[0] + rv[1] * rv[1]),
-			igp_state[c].chkfrom[0], igp_state[c].chkfrom[1], igp_state[c].chkfrom[2], igp_state[c].chklip);
+			igp_state[c].chkfrom[0], igp_state[c].chkfrom[1], igp_state[c].chkfrom[2], igp_state[c].chklip, igp_state[c].chkcls);
 	}
 	if (c < 0 || c >= MAX_CLIENTS || trap_Cvar_VariableIntegerValue("ig_plandebug") != 2) return;
 	VectorCopy(bs->cur_ps.origin, eye);
@@ -347,8 +347,9 @@ static void IGX_FindClimb(igx_t *x, const vec3_t org)
 
 	x->climbrn = 0; x->nclimb = 0;
 	if (!x->canfire || !LibVarValue("ig_planclimb", "0") || c < 0 || c >= MAX_CLIENTS || !x->goalarea) return;
-	/* not yet with LMCTF's hook: 28 maps, hooks that climbed -2.7 pts (its pull is misjudged) */
-	if (LibVarValue("ig_hookstyle", "0") && !LibVarValue("ig_planclimblmctf", "0")) return;
+	/* LMCTF too since 2026-11-28 (the hook commit lasts the slower flight): 28 maps level, slingshots +0.55/bot/min;
+	 * its planner climbs fired standing 6% (stock 75-79%). ig_planclimblmctf 0 = stock climbs only with LMCTF */
+	if (LibVarValue("ig_hookstyle", "0") && !LibVarValue("ig_planclimblmctf", "1")) return;
 	maxd = LibVarValue("ig_planclimbdist", "600");
 	VectorCopy(org, o);
 	ar = AAS_PointAreaNum(o);
@@ -1166,8 +1167,17 @@ int IG_Plan(bot_state_t *bs, bot_goal_t *goal, bot_moveresult_t *mr)
 		/* a hook of ours still flying, just fired: held until it bites (Billy
 		 * commits; the bots let go of 40% of their lip slingshots before the
 		 * bite, the hook wasted) -- unless every hold is bad (below: best < 0) */
+		/* ...for at least ig_planhookcommit, and as long as the hook needs to
+		 * reach its anchor: LMCTF's flies at 800 u/s, half OSP's, so a climb
+		 * anchor 400 out took 0.5 s and the planner let go of it mid-flight
+		 * (16% of its LMCTF climbs never bit, OSP 5%) */
+		float commit = LibVarValue("ig_planhookcommit", "0.4"), reach;
+		vec3_t ad;
+		VectorSubtract(igp_state[c].anchor, bs->eye, ad);
+		reach = VectorLength(ad) / LibVarValue("ig_hookfly", "1600") + LibVarValue("ig_planhookcommitpad", "0.15");
+		if (reach > commit && reach < 2) commit = reach;
 		int committed = x.hook == 1 && igp_state[c].hookout &&
-						FloatTime() - igp_state[c].firetime < LibVarValue("ig_planhookcommit", "0.4") && FloatTime() >= igp_state[c].firetime;
+						FloatTime() - igp_state[c].firetime < commit && FloatTime() >= igp_state[c].firetime;
 		if (!committed) {
 			OPT(PO_LETGO, 0, 0, -1, -1, 0, 1);
 			{ OPT(PO_LANDHOP, 0, 0, -1, -1, 0, 1); opts[n - 1].landhop = 1; }	/* let go, hop the landing */
@@ -1396,6 +1406,7 @@ int IG_Plan(bot_state_t *bs, bot_goal_t *goal, bot_moveresult_t *mr)
 				int k2;
 				igp_state[c].chk0 = FloatTime(); igp_state[c].chkn = o->nat; igp_state[c].chkdone = 0;
 				igp_state[c].chkkind = o->kind; igp_state[c].chklip = o->anchor >= 0 ? x.anchorlip[o->anchor] : 0;
+				igp_state[c].chkcls = igp_state[c].anchorclass;
 				VectorCopy(bs->cur_ps.origin, igp_state[c].chkfrom);
 				for (k2 = 0; k2 < o->nat; k2++) { VectorCopy(o->at[k2], igp_state[c].chkat[k2]); VectorCopy(o->atvel[k2], igp_state[c].chkvel[k2]); }
 			}
