@@ -58,8 +58,8 @@ void IG_PadDrillNoteTop(int client);
  * seconds, scaled by the bot's hook affinity (a grapple lover pays less):
  * libvar ig_planhookcost (s at the middle affinity, 0.55). */
 #define PLAN_COAST		15		/* up to 1.5 s more, running the route, until the extra speed is spent */
-#define PLAN_MAXANCH	44	/* IG-47: + 18 lip anchors (floor, ceiling) before a momentum jump; + 8 corner turn hooks */
-#define PLAN_MAXOPT		60	/* IG-47: room for the lip anchors' and turn hooks' slingshots */
+#define PLAN_MAXANCH	36	/* IG-47: + 18 lip anchors (floor, ceiling) before a momentum jump */
+#define PLAN_MAXOPT		48	/* IG-47: room for the lip anchors' slingshots */
 
 enum { PO_RUN, PO_HOP, PO_SLING, PO_FIRE, PO_HOLD, PO_LETGO, PO_LETGOHOP, PO_HOLDHOP, PO_LANDHOP };
 static const char *po_names[] = { "run", "hop", "sling", "fire", "hold", "letgo", "letgohop", "holdhop", "landhop" };
@@ -90,8 +90,6 @@ typedef struct {
 	vec3_t		anchorview[PLAN_MAXANCH];	/* pitch, yaw from the eye now */
 	int			anchorclass[PLAN_MAXANCH];	/* IGA_SLING, IGA_UP, IGA_SIDE */
 	int			anchorlip[PLAN_MAXANCH];	/* IG-47: a lip anchor short of a momentum jump's edge */
-	int			anchorturn[PLAN_MAXANCH];	/* T13: a corner turn hook (IGX_TurnHooks) */
-	int			turnmark;
 	float		anchornz[PLAN_MAXANCH];		/* the surface's normal z: > 0.7 floor */
 	bot_goal_t	*goal;
 	int			numanchors;
@@ -144,7 +142,7 @@ static struct {
 	float	jumpuntil;
 	vec3_t	jumpfrom, jumpdir, jumpto;
 	/* ig_planoutcheck: a fired hook's predicted path, checked as it happens */
-	float	chk0; int chkn, chkdone, chkkind, chklip, chkturn; vec3_t chkat[3], chkvel[3], chkfrom;
+	float	chk0; int chkn, chkdone, chkkind, chklip; vec3_t chkat[3], chkvel[3], chkfrom;
 } igp_state[MAX_CLIENTS];
 
 /* ------------------------------------------------------------ diagnostics */
@@ -176,10 +174,10 @@ void IG_PlanTick(bot_state_t *bs)
 		FloatTime() - igp_state[c].chk0 >= 0.5f * (igp_state[c].chkdone + 1) - 0.025f) {
 		int k2 = igp_state[c].chkdone++;
 		float *pa = igp_state[c].chkat[k2], *pv = igp_state[c].chkvel[k2], *ra = bs->cur_ps.origin, *rv = bs->cur_ps.velocity;
-		BotAI_Print(PRT_MESSAGE, "igpout %d t %.1f err %.0f pred %.0f %.0f %.0f v %.0f real %.0f %.0f %.0f v %.0f from %.0f %.0f %.0f lip %d turn %d\n", c, 0.5f * (k2 + 1),
+		BotAI_Print(PRT_MESSAGE, "igpout %d t %.1f err %.0f pred %.0f %.0f %.0f v %.0f real %.0f %.0f %.0f v %.0f from %.0f %.0f %.0f lip %d\n", c, 0.5f * (k2 + 1),
 			sqrt((pa[0] - ra[0]) * (pa[0] - ra[0]) + (pa[1] - ra[1]) * (pa[1] - ra[1]) + (pa[2] - ra[2]) * (pa[2] - ra[2])),
 			pa[0], pa[1], pa[2], sqrt(pv[0] * pv[0] + pv[1] * pv[1]), ra[0], ra[1], ra[2], sqrt(rv[0] * rv[0] + rv[1] * rv[1]),
-			igp_state[c].chkfrom[0], igp_state[c].chkfrom[1], igp_state[c].chkfrom[2], igp_state[c].chklip, igp_state[c].chkturn);
+			igp_state[c].chkfrom[0], igp_state[c].chkfrom[1], igp_state[c].chkfrom[2], igp_state[c].chklip);
 	}
 	if (c < 0 || c >= MAX_CLIENTS || trap_Cvar_VariableIntegerValue("ig_plandebug") != 2) return;
 	VectorCopy(bs->cur_ps.origin, eye);
@@ -849,7 +847,6 @@ static void IGX_AnchorTry(igx_t *x, float pitch, float yaw, float mind, int cls)
 	if (x->anchorview[x->numanchors][PITCH] > 180) x->anchorview[x->numanchors][PITCH] -= 360;
 	x->anchorclass[x->numanchors] = cls;
 	x->anchorlip[x->numanchors] = x->nearonly;
-	x->anchorturn[x->numanchors] = x->turnmark;
 	x->anchornz[x->numanchors] = tr.plane.normal[2];
 	x->numanchors++;
 }
@@ -902,42 +899,6 @@ static float IGX_WallParallel(igx_t *x, float baseyaw)
 	return baseyaw;
 }
 
-/* T13 hook to turn, Billy's corner hook (ztn2dm3, 6 tries 2026-11-28): flying
- * at 620-860 u/s, 100-170 units short of the wall where the route turns, he
- * hooks the floor 20-29 deg down and 75-90 deg toward the turn, holds ~0.5 s
- * and lets go heading the new way at 730-920. Offered in the air at 500+ with
- * a wall ahead within 400 (ig_planturnhook); the sim decides. */
-static void IGX_TurnHooks(igx_t *x)
-{
-	static const float tyaw[2] = {65, 85};
-	float tpitch[2] = {LibVarValue("ig_planturnpitch", "20"), LibVarValue("ig_planturnpitch", "20") + 6};
-	vec3_t vel, start, end, want;
-	bsp_trace_t tr;
-	float vy, side, speed;
-	int i, j;
-
-	if (!LibVarValue("ig_planturnhook", "0") || x->bs->cur_ps.groundEntityNum != ENTITYNUM_NONE) return;
-	VectorSet(vel, x->bs->cur_ps.velocity[0], x->bs->cur_ps.velocity[1], 0);
-	speed = VectorNormalize(vel);
-	if (speed < LibVarValue("ig_planturnspeed", "500")) return;
-	VectorCopy(x->bs->eye, start);
-	VectorMA(start, LibVarValue("ig_planturnwall", "400"), vel, end);
-	BotAI_Trace(&tr, start, NULL, NULL, end, x->bs->entitynum, CONTENTS_SOLID | CONTENTS_PLAYERCLIP);
-	if (tr.fraction >= 1 || fabs(tr.plane.normal[2]) > 0.5f) return;
-	/* which way the route turns: toward the look-ahead point, else the goal */
-	if (x->haslook) VectorSubtract(x->look, x->bs->origin, want);
-	else if (x->goal) VectorSubtract(x->goalorg, x->bs->origin, want);
-	else return;
-	side = vel[0] * want[1] - vel[1] * want[0];
-	if (fabs(side) < 1) return;
-	vy = atan2(vel[1], vel[0]) * 180 / M_PI;
-	x->turnmark = 1;
-	for (i = 0; i < 2; i++)
-		for (j = 0; j < 2; j++)
-			IGX_AnchorTry(x, tpitch[j], vy + (side > 0 ? tyaw[i] : -tyaw[i]), 80, IGA_SLING);
-	x->turnmark = 0;
-}
-
 static void IGX_Anchors(igx_t *x, const vec3_t routedir)
 {
 	/* + is down. From the eye on the ground (46 up) 12 down meets the floor
@@ -971,7 +932,6 @@ static void IGX_Anchors(igx_t *x, const vec3_t routedir)
 		IGX_AnchorTry(x, ang[PITCH], ang[YAW], 48, IGA_CLIMB);
 		if (x->numanchors > before && Distance(x->anchors[before], x->climbanch[i]) > 32) x->numanchors = before;	/* the hook would bite elsewhere */
 	}
-	IGX_TurnHooks(x);
 	/* IG-47, Billy's slingshot before a momentum jump (ztn2dm3, 5 tries
 	 * 2026-11-27): in the air at 110-290 u/s he hooks the floor at the very lip
 	 * of the ledge, 120-200 units out and 20-35 degrees down, holds 1-2 frames,
@@ -1245,11 +1205,6 @@ int IG_Plan(bot_state_t *bs, bot_goal_t *goal, bot_moveresult_t *mr)
 				/* IG-47, Billy's lip slingshot (ztn2dm3, 2026-11-28): a bite held
 				 * one frame, let go at 943 u/s 130 units short of the anchor */
 				if (x.anchorlip[i]) { OPT(PO_SLING, 0, ground, i, 1, 1, 0); opts[n - 1].hookmul = IGX_ClassMul(x.anchorclass[i]); opts[n - 1].landhop = x.slinghop; }
-				/* T13 turn hook: Billy holds his ~0.5 s, the pull swings him round */
-				if (x.anchorturn[i]) {
-					OPT(PO_SLING, 0, ground, i, 1, 5, 0); opts[n - 1].hookmul = IGX_ClassMul(x.anchorclass[i]); opts[n - 1].landhop = x.slinghop;
-					OPT(PO_SLING, 0, ground, i, 1, 7, 0); opts[n - 1].hookmul = IGX_ClassMul(x.anchorclass[i]); opts[n - 1].landhop = x.slinghop;
-				}
 			}
 		}
 	}
@@ -1441,7 +1396,6 @@ int IG_Plan(bot_state_t *bs, bot_goal_t *goal, bot_moveresult_t *mr)
 				int k2;
 				igp_state[c].chk0 = FloatTime(); igp_state[c].chkn = o->nat; igp_state[c].chkdone = 0;
 				igp_state[c].chkkind = o->kind; igp_state[c].chklip = o->anchor >= 0 ? x.anchorlip[o->anchor] : 0;
-				igp_state[c].chkturn = o->anchor >= 0 ? x.anchorturn[o->anchor] : 0;
 				VectorCopy(bs->cur_ps.origin, igp_state[c].chkfrom);
 				for (k2 = 0; k2 < o->nat; k2++) { VectorCopy(o->at[k2], igp_state[c].chkat[k2]); VectorCopy(o->atvel[k2], igp_state[c].chkvel[k2]); }
 			}
@@ -1684,119 +1638,10 @@ int IG_PlanHookUnsafe(bot_state_t *bs, int hold)
 
 /* ------------------------------------------------------------- fights */
 
-/* The fight movement (IG-40, in place of BotAttackMove). A railgun fight is
- * one shot each way, so a dodge is good when it is hard to hit -- fast
- * across the enemy's line -- and when it PEEKS: in sight of the enemy while
- * the rail is loaded, out of it while it reloads (Billy: quick-peeking a
- * corner). Each think, FIGHT_OPTS dodges (strafe either side, angled in, out
- * or square, with and without a hop; straight in; straight out) are flown
- * FIGHT_THINKS in Quake II's movement against the enemy where it is now and
- * costed; lava, slime and pits are out, as everywhere. A dodge is kept for a
- * random 0.3-0.8 s unless it turns bad, so the bot does not jitter. */
-#define FIGHT_THINKS	8
-#define FIGHT_RELOAD	1.5f	/* the railgun's cycle, s (libvar ig_planreload) */
-
-static struct {
-	int		opt;			/* the dodge under way, -1 none */
-	float	until;			/* kept until then */
-	float	lastshot;
-	int		shooting;
-	float	range;			/* the range this fight wants (ig_pfstance) */
-	float	rangeuntil;
-	int		rangeenemy;
-} igf[MAX_CLIENTS];
-
-typedef struct {
-	vec3_t	dir;
-	int		hop;
-	float	cost;
-	int		ok;
-} igfopt_t;
-
-static int IGX_Sees(bot_state_t *bs, const vec3_t eye, const vec3_t target)
-{
-	bsp_trace_t tr;
-	vec3_t a, b;
-
-	VectorCopy(eye, a);
-	VectorCopy(target, b);
-	BotAI_Trace(&tr, a, NULL, NULL, b, bs->entitynum, CONTENTS_SOLID | CONTENTS_PLAYERCLIP);
-	return tr.fraction >= 1;
-}
-
-static float igf_lat, igf_peek;	/* tuning (libvars ig_pflat, ig_pfpeek), read once a think */
-/* Position (Billy: the fight planner was even, but slower and worse positioned):
- * where a dodge leaves the bot on the way to its long-term goal -- the roam's
- * hunt or high-ground point, or the item it was after -- against where it is
- * now (ig_pfroute, per second of travel saved), and the higher ground
- * (ig_pfhigh, at 200+ units above the enemy). igf_tt0: travel time from here. */
-static float igf_route, igf_high, igf_near, igf_nearat, igf_range;
-static int igf_tt0;
-
-static void IGX_FightSim(igx_t *x, igfopt_t *o, const vec3_t enemyeye, float ready, float skill)
-{
-	igpm_t pm;
-	vec3_t eye, line, side, vh;
-	float fm, sm, lat = 0, cost = 0, d, before, after, wallpen = 0;
-	int t, half;
-
-	IGX_Start(x, &pm);
-	o->ok = 0;
-	IGX_Moves(o->dir, x->lastview[YAW], &fm, &sm);
-	for (t = 0; t < FIGHT_THINKS; t++) {
-		VectorSet(vh, pm.vel[0], pm.vel[1], 0);
-		before = VectorLength(vh);
-		pm.blocked = 0;
-		for (half = 0; half < 2; half++)
-			IG_Pmove(&pm, fm, sm, o->hop && t == 0 ? 400 : 0, x->lastview[PITCH], x->lastview[YAW], 50);
-		if (pm.everhit & (CONTENTS_LAVA | CONTENTS_SLIME)) return;
-		if (pm.pad || pm.teleport) return;		/* not mid-fight */
-		VectorSet(vh, pm.vel[0], pm.vel[1], 0);
-		after = VectorLength(vh);
-		if (pm.blocked && before - after > 150) wallpen += 0.05f;
-		/* across the enemy's line: what makes a rail miss */
-		VectorSubtract(enemyeye, pm.org, line);
-		line[2] = 0;
-		d = VectorNormalize(line);
-		VectorSet(side, -line[1], line[0], 0);
-		lat += fabs(DotProduct(vh, side));
-		/* peek: in sight when loaded, out of it when not */
-		VectorCopy(pm.org, eye);
-		eye[2] += pm.ducked ? -2 : 22;
-		if (IGX_Sees(x->bs, eye, enemyeye)) {
-			if (ready > (t + 1) * 0.1f) cost += 0.04f * igf_peek;	/* seen while reloading */
-		} else {
-			if (ready <= (t + 1) * 0.1f) cost += 0.05f;		/* loaded and blind */
-		}
-		/* range: rails reach anywhere, but too close is a coin toss and too far a duel of luck */
-		if (d < 250) cost += 0.02f;
-		else if (d > 1400) cost += 0.01f;
-		/* closing in: the stock attack move walks to 140 units, and a rail's
-		 * aim error is an angle, so the nearer, the surer (ig_pfnear, per
-		 * think per 1000 units beyond ig_pfnearat) */
-		if (igf_near > 0) {
-			if (igf_range > 0) {		/* a range to hold, either side of it */
-				float off = fabs(d - igf_range) - 150;
-
-				if (off > 0) cost += igf_near * off / 1000;
-			} else if (d > igf_nearat) cost += igf_near * (d - igf_nearat) / 1000;
-		}
-	}
-	if (IGX_EndUnsafe(x, &pm)) return;
-	if (igf_route > 0 && x->goalarea && igf_tt0) {
-		int tt = pm.area == x->goalarea ? 0 : pm.area ? AAS_AreaTravelTimeToGoalArea(pm.area, pm.org, x->goalarea, x->tfl) : 0;
-
-		if (pm.area == x->goalarea || tt) cost += igf_route * (tt - igf_tt0) * 0.01f;
-		else cost += 0.2f;	/* off the route */
-	}
-	lat /= FIGHT_THINKS;
-	cost -= igf_lat * skill * (lat > 450 ? 1.5f : lat / 300);
-	/* the higher ground */
-	d = pm.org[2] - (enemyeye[2] - 22);
-	cost -= igf_high * (d > 200 ? 1 : d < -200 ? -1 : d / 200);
-	o->cost = cost + wallpen;
-	o->ok = 1;
-}
+/* Fights: the planner keeps its own flights in a fight (IGX_FightFlight) and
+ * leaves the rest to the stock attack move. (A fight planner -- dodges scored
+ * for peeking and position, ig_planfight -- came out even with the stock
+ * movement head to head and was removed 2026-11-28; numbers in IG-SPECS IG-40.) */
 
 /* A fight that starts mid-flight: the planner's own flight is still the
  * planner's until it lands -- steered, its landing hopped -- and its own hook
@@ -1951,127 +1796,10 @@ int IG_PlanPadFightFlight(bot_state_t *bs)
 
 int IG_PlanFight(bot_state_t *bs)
 {
-	igx_t x;
-	igfopt_t opts[16];
-	aas_entityinfo_t enemy, self;
-	vec3_t fwd, side, enemyeye, eye;
-	float skill, jumper, ready, best = 1e9f, total, r, w[16];
-	int c = bs->client, n = 0, i, s, pick, b = -1;
-	static const float angles[3] = {0, 45, -45};	/* square, angled in, angled out */
+	int c = bs->client;
 
 	if (!IG_PlanOn() || c < 0 || c >= MAX_CLIENTS || BotIsDead(bs) || bs->enemy < 0) return 0;
-	if (IGX_FightFlight(bs)) return 1;
-	if (!LibVarValue("ig_planfight", "0")) return 0;	/* off: even with stock fights head to head (IG-40) */
-	/* testing: only odd client numbers fight with the planner, so the two
-	 * fight movements meet in the same matches (ig_pfodd 1) */
-	if (LibVarValue("ig_pfodd", "0") && !(c & 1)) return 0;
-	if (bs->attackchase_time > FloatTime()) return 0;		/* chasing: the route's */
-	skill = trap_Characteristic_BFloat(bs->character, CHARACTERISTIC_ATTACK_SKILL, 0, 1);
-	jumper = trap_Characteristic_BFloat(bs->character, CHARACTERISTIC_JUMPER, 0, 1);
-	if (skill < 0.2f) return 0;
-	Com_Memset(&x, 0, sizeof(x));
-	x.bs = bs;
-	VectorCopy(bs->cur_ps.origin, eye);
-	eye[2] += bs->cur_ps.viewheight;
-	x.hook = IG_OwnHook(eye, VectorLength(bs->cur_ps.velocity), x.hookpos);
-	if (x.hook) return 0;									/* a fight hook: its own code */
-	if (AAS_PointContents(bs->origin) & (CONTENTS_WATER | CONTENTS_LAVA | CONTENTS_SLIME)) return 0;
-	VectorCopy(bs->viewangles, x.lastview);
-	if (x.lastview[PITCH] > 180) x.lastview[PITCH] -= 360;
-
-	/* the rail's reload: from this bot's own shots */
-	BotEntityInfo(c, &self);
-	if (EntityIsShooting(&self) && !igf[c].shooting) igf[c].lastshot = FloatTime();
-	igf[c].shooting = EntityIsShooting(&self);
-	if (igf[c].lastshot > FloatTime()) igf[c].lastshot = 0;		/* a new map */
-	ready = igf[c].lastshot + LibVarValue("ig_planreload", "1.5") - FloatTime();
-	if (ready < 0) ready = 0;
-
-	BotEntityInfo(bs->enemy, &enemy);
-	if (!enemy.valid) return 0;
-	VectorCopy(enemy.origin, enemyeye);
-	enemyeye[2] += 22;
-	VectorSubtract(enemy.origin, bs->origin, fwd);
-	fwd[2] = 0;
-	if (VectorNormalize(fwd) < 1) return 0;
-
-	igf_lat = LibVarValue("ig_pflat", "0.12");
-	igf_peek = LibVarValue("ig_pfpeek", "1");
-	igf_route = LibVarValue("ig_pfroute", "0");
-	igf_high = LibVarValue("ig_pfhigh", "0.03");
-	igf_near = LibVarValue("ig_pfnear", "0");
-	igf_nearat = LibVarValue("ig_pfnearat", "300");
-	/* ig_pfstance 1 (Billy: with the railgun, angles and keeping distance matter): not always closing in. Each fight -- a new enemy, or every
-	 * 3-6 s -- picks a range to hold: close 250, mid 550 or long 900, the odds
-	 * from the character's aggression (close 0.15 + 0.5 a, long 0.45 - 0.4 a). */
-	igf_range = 0;
-	if (LibVarValue("ig_pfstance", "0")) {
-		if (igf[c].rangeenemy != bs->enemy || FloatTime() > igf[c].rangeuntil || igf[c].rangeuntil > FloatTime() + 10) {
-			float a = trap_Characteristic_BFloat(bs->character, CHARACTERISTIC_AGGRESSION, 0, 1), r2 = random();
-			float pc = 0.15f + 0.5f * a, pl = 0.45f - 0.4f * a;
-
-			igf[c].range = r2 < pc ? 250 : r2 < 1 - pl ? 550 : 900;
-			igf[c].rangeenemy = bs->enemy;
-			igf[c].rangeuntil = FloatTime() + 3 + random() * 3;
-			if (trap_Cvar_VariableIntegerValue("ig_plandebug") >= 1)
-				BotAI_Print(PRT_MESSAGE, "igstance %d range %.0f aggr %.2f\n", c, igf[c].range, a);
-		}
-		igf_range = igf[c].range;
-	}
-	igf_tt0 = 0;
-	if (igf_route > 0) {
-		bot_goal_t goal;
-
-		if (trap_BotGetTopGoal(bs->gs, &goal) && goal.areanum) {
-			x.goalarea = goal.areanum;
-			VectorCopy(goal.origin, x.goalorg);
-			x.tfl = bs->tfl;
-			igf_tt0 = bs->areanum == goal.areanum ? 0 : AAS_AreaTravelTimeToGoalArea(bs->areanum, bs->origin, goal.areanum, bs->tfl);
-		}
-	}
-	for (s = -1; s <= 1; s += 2)
-		for (i = 0; i < 3; i++) {
-			float a = DEG2RAD(90 * s + angles[i] * s);
-
-			VectorSet(side, fwd[0] * cos(a) - fwd[1] * sin(a), fwd[0] * sin(a) + fwd[1] * cos(a), 0);
-			VectorCopy(side, opts[n].dir); opts[n].hop = 0; n++;
-			if (LibVarValue("ig_pfhop", "1") && (bs->cur_ps.groundEntityNum == ENTITYNUM_NONE || IGX_HSpeed(bs) >= LibVarValue("ig_planhopmin", "250"))) {
-				VectorCopy(side, opts[n].dir); opts[n].hop = 1; n++;	/* no hop from a standstill (ig_planhopmin) */
-			}
-		}
-	VectorCopy(fwd, opts[n].dir); opts[n].hop = 0; n++;
-	VectorScale(fwd, -1, opts[n].dir); opts[n].hop = 0; n++;
-
-	for (i = 0; i < n; i++) {
-		IGX_FightSim(&x, &opts[i], enemyeye, ready, skill);
-		if (!opts[i].ok) continue;
-		if (i == igf[c].opt && FloatTime() < igf[c].until) opts[i].cost -= 0.15f;	/* keep it a while */
-		if (opts[i].cost < best) { best = opts[i].cost; b = i; }
-	}
-	if (b < 0) return 0;		/* nothing safe: the stock move, which the guard then turns */
-	if (b == igf[c].opt && FloatTime() < igf[c].until) {
-		pick = b;
-	} else {
-		/* a fair pick among the near-best; a jumper likes the hops */
-		total = 0;
-		for (i = 0; i < n; i++) {
-			w[i] = opts[i].ok && opts[i].cost <= best + PLAN_MARGIN ? (opts[i].hop ? 0.3f + jumper : 1) : 0;
-			total += w[i];
-		}
-		r = random() * total;
-		for (pick = b, i = 0; i < n; i++) {
-			if (w[i] <= 0) continue;
-			if (r < w[i]) { pick = i; break; }
-			r -= w[i];
-		}
-		igf[c].opt = pick;
-		igf[c].until = FloatTime() + 0.3f + random() * 0.5f;
-	}
-	EA_IGMove(c, opts[pick].dir, 400, opts[pick].hop && bs->cur_ps.groundEntityNum != ENTITYNUM_NONE, 0);
-	igp_state[c].steered = FloatTime();
-	if (trap_Cvar_VariableIntegerValue("ig_plandebug") == 2)
-		BotAI_Print(PRT_MESSAGE, "igfight %d opt %d hop %d cost %.2f best %.2f ready %.2f\n", c, pick, opts[pick].hop, opts[pick].cost, best, ready);
-	return 1;
+	return IGX_FightFlight(bs);
 }
 
 /* IG-40 pad top (libvar ig_planpadsling, default 1 since ig-0.5): in a jump pad's flight,
