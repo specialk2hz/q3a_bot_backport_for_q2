@@ -2881,7 +2881,6 @@ int BotFindEnemy(bot_state_t *bs, int curenemy) {
 	//remember the current health value
 	bs->lasthealth = bs->inventory[INVENTORY_HEALTH];
 	if (IG_Peace()) return false; /* IG: no enemies at all (IG-27) */
-	{ int igr = IG_RevengeFindEnemy(bs, curenemy); if (igr >= 0) return igr; } /* IG: the nemesis first (IG-8) */
 	//
 	if (curenemy >= 0) {
 		BotEntityInfo(curenemy, &curenemyinfo);
@@ -4797,7 +4796,6 @@ void BotCheckEvents(bot_state_t *bs, entityState_t *state) {
 				else bs->botsuicide = false;
 				//
 				bs->num_deaths++;
-				IG_RevengeDeath(bs, attacker); /* IG: IG-8 */
 			}
 			//else if this client was killed by the bot
 			else if (attacker == bs->client) {
@@ -4806,7 +4804,6 @@ void BotCheckEvents(bot_state_t *bs, entityState_t *state) {
 				bs->killedenemy_time = FloatTime();
 				//
 				bs->num_kills++;
-				IG_RevengeKill(bs, target); /* IG: IG-8 */
 			}
 			else if (attacker == bs->enemy && target == attacker) {
 				bs->enemysuicide = true;
@@ -5243,7 +5240,7 @@ void BotDeathmatchAI(bot_state_t *bs, float thinktime) {
 		BotUpdateInventory(bs);
 		//check out the snapshot
 		BotCheckSnapshot(bs);
-		IG_RoamThink(bs); /* IG: what the bot saw and heard (IG-7) */
+		IG_HighGroundThink(bs); /* IG: passed the high-ground point (ig_botnav) */
 		//check for air
 		BotCheckAir(bs);
 	}

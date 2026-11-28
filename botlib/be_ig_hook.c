@@ -517,7 +517,7 @@ int IG_CanFireHook(int client)
 	return AAS_Time() - ig_lastfire[client] >= IG_HOOK_WAIT;
 }
 
-/* The map's high ground, for the roam goal (game_q3/ai_ig_roam.c, IG-7):
+/* The map's high ground, for the idle bots' goal (game_q3/ai_ig_highground.c; IG-7, kept in ig_botnav):
  * standable areas whose floor is in the top 40% of the map's floor heights
  * (5th to 95th percentile), highest first, at least IG_HG_SPREAD apart, at
  * most IG_HG_MAX. Worked out once per map, on first use. */

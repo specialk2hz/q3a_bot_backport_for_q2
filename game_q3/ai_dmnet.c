@@ -302,7 +302,7 @@ int BotGetItemLongTermGoal(bot_state_t *bs, int tfl, bot_goal_t *goal) {
 			BotAI_Print(PRT_MESSAGE, "%1.1f: new long term goal %s\n", FloatTime(), buf);
             */
 			bs->ltg_time = FloatTime() + 20;
-			IG_RoamReplace(bs, tfl); /* IG: a reason instead of the random goal (IG-7) */
+			IG_HighGroundReplace(bs); /* IG: high ground instead of the random goal (ig_botnav) */
 		}
 		else {//the bot gets sorta stuck with all the avoid timings, shouldn't happen though
 			//

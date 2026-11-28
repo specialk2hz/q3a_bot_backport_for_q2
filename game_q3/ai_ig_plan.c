@@ -1912,3 +1912,29 @@ int IG_PlanFlightView(bot_state_t *bs)
 	bs->ideal_viewangles[PITCH] = 0;
 	return 1;
 }
+
+/* ------------------------------------------------------- shared helpers
+ * (from ai_ig_roam.c, removed with IG-7 roaming and IG-8 revenge, 2026-11-28) */
+
+/* IG-27 ig_peace: bots pick no enemies (BotFindEnemy) and keep no traces to
+ * hunt, so they only move: for watching their movement and testing routes. */
+int IG_Peace(void)
+{
+	return trap_Cvar_VariableIntegerValue("ig_peace") != 0;
+}
+
+/* Diagnostic (cvar ig_movedebug, default 0): a line per think while the bot
+ * seeks its long-term goal -- where it is, the goal, the travel type it is
+ * executing and any failure -- to see why a bot mills around a spot. 2: only
+ * failures and blocks. */
+void IG_MoveDebug(bot_state_t *bs, bot_goal_t *goal, bot_moveresult_t *mr)
+{
+	int level = trap_Cvar_VariableIntegerValue("ig_movedebug");
+
+	if (!level) return;
+	if (level >= 2 && !mr->failure && !mr->blocked) return;
+	BotAI_Print(PRT_MESSAGE, "ig: move %d at %.0f %.0f %.0f area %d goal %.0f %.0f %.0f area %d travel %d fail %d blocked %d flags %d ent %d reach %d\n",
+				bs->client, bs->origin[0], bs->origin[1], bs->origin[2], bs->areanum,
+				goal->origin[0], goal->origin[1], goal->origin[2], goal->areanum,
+				mr->traveltype, mr->failure, mr->blocked, mr->flags, mr->blockentity, trap_AAS_AreaReachability(bs->areanum));
+}
